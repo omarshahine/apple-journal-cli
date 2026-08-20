@@ -1,34 +1,65 @@
 #!/usr/bin/env python3
-"""journal-cli — read (and cautiously write) Apple Journal entries.
+"""journal-cli — read and write Apple Journal entries, including media and location.
 
 Journal's store is a Core Data SQLite database at
     ~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite
 "moments" is Journal's internal codename. Entry bodies are plain RTF in
 ZJOURNALENTRYMO.ZTEXT — not encrypted. Requires Full Disk Access.
 
-Reads run against a temp snapshot (db + -wal + -shm) so the live store is never
-locked. Writes are opt-in, refuse to run while Journal is open, and always take
-a backup first.
+Reads run against a temp snapshot so the live store is never locked. Writes are
+opt-in, refuse to run while Journal is open, and always back up first.
 """
 
-import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, uuid, datetime
+import argparse, json, os, shutil, sqlite3, stat, subprocess, sys, tempfile, uuid, datetime
 
 GROUP = os.path.expanduser("~/Library/Group Containers/group.com.apple.moments/Library")
 DEFAULT_DB = os.path.join(GROUP, "moments.sqlite")
-ATTACH = os.path.join(GROUP, "Attachments")
 BACKUPS = os.path.expanduser("~/Backups/journal-cli")
-EPOCH = 978307200          # Core Data reference date -> unix epoch
-ENT_ENTRY = "JournalEntryMO"
+EPOCH = 978307200                      # Core Data reference date -> unix epoch
 
-DB = DEFAULT_DB            # rebound from --db / $JOURNAL_DB
+# Core Data entity ids (Z_ENT), from Z_PRIMARYKEY
+ENT = {"entry": "JournalEntryMO", "asset": "JournalEntryAssetMO",
+       "file": "JournalEntryAssetFileAttachmentMO"}
+
+PHOTO_EXT = {".jpg", ".jpeg", ".heic", ".heif", ".png", ".gif", ".tiff", ".webp"}
+VIDEO_EXT = {".mov", ".mp4", ".m4v", ".avi"}
+
+DB = DEFAULT_DB                        # rebound from --db / $JOURNAL_DB
 
 
 def die(msg, code=1):
     print(f"journal-cli: {msg}", file=sys.stderr)
     sys.exit(code)
 
+def attach_dir():
+    """Attachments live beside the database, so sandboxes stay self-contained."""
+    return os.path.join(os.path.dirname(os.path.abspath(DB)), "Attachments")
+
 def cd_now():
     return datetime.datetime.now().timestamp() - EPOCH
+
+def cd(dt):
+    return dt.timestamp() - EPOCH
+
+def uid():
+    return str(uuid.uuid4()).upper()
+
+def uid_bytes(u):
+    return uuid.UUID(u).bytes
+
+def u_str(b):
+    try: return str(uuid.UUID(bytes=b)).upper()
+    except Exception: return None
+
+def stdin_has_data():
+    """True only for a pipe or redirected file. A tty or /dev/null would block."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return False
+    try:
+        m = os.fstat(sys.stdin.fileno()).st_mode
+    except OSError:
+        return False
+    return stat.S_ISFIFO(m) or stat.S_ISREG(m)
 
 def journal_running():
     return subprocess.run(["pgrep", "-x", "Journal"], capture_output=True).returncode == 0
@@ -81,19 +112,13 @@ class Live:
                     "  Test against a sandbox first:  journal-cli sandbox --dir DIR")
             if journal_running():
                 die("Journal.app is running. Quit it first, then retry.")
-            self.backup_dir = backup()
-            print(f"backup: {self.backup_dir}", file=sys.stderr)
-        else:
-            self.backup_dir = None
+            print(f"backup: {backup()}", file=sys.stderr)
         self.conn = sqlite3.connect(DB)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys=ON")
         return self.conn
     def __exit__(self, exc_type, *rest):
-        if exc_type:
-            self.conn.rollback()
-        else:
-            self.conn.commit()
+        if exc_type: self.conn.rollback()
+        else: self.conn.commit()
         self.conn.close()
 
 
@@ -102,8 +127,7 @@ class Live:
 def rtf_batch(blobs):
     out = [""] * len(blobs)
     idxs = [i for i, b in enumerate(blobs) if b]
-    if not idxs:
-        return out
+    if not idxs: return out
     d = tempfile.mkdtemp(prefix="journal-rtf.")
     try:
         names = []
@@ -122,22 +146,32 @@ def rtf_batch(blobs):
 def txt_to_rtf(text):
     d = tempfile.mkdtemp(prefix="journal-rtf.")
     try:
-        src = os.path.join(d, "in.txt")
-        open(src, "w").write(text)
+        src = os.path.join(d, "in.txt"); open(src, "w").write(text)
         subprocess.run(["textutil", "-convert", "rtf", src], capture_output=True, timeout=60)
         rtf = os.path.join(d, "in.rtf")
-        if not os.path.exists(rtf):
-            die("textutil failed to produce RTF")
+        if not os.path.exists(rtf): die("textutil failed to produce RTF")
         return open(rtf, "rb").read()
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- metadata blobs
+
+def meta_blob(obj):
+    """Journal asset metadata: one version byte (0x01) then JSON."""
+    return b"\x01" + json.dumps(obj, ensure_ascii=False).encode()
+
+def parse_meta(b):
+    if not b: return None
+    try: return json.loads(b[1:] if b[:1] == b"\x01" else b)
+    except Exception: return None
 
 
 # ---------------------------------------------------------------- queries
 
 def fetch(conn, since=None, until=None, include_empty=False):
     rows = conn.execute("""
-        select Z_PK, ZENTRYDATE, ZTEXTLENGTH, ZFLAGGED, ZISDRAFT,
+        select Z_PK, ZID, ZENTRYDATE, ZTEXTLENGTH, ZFLAGGED, ZISDRAFT,
                ZISUPLOADEDTOCLOUD, ZTITLE, ZTEXT
         from ZJOURNALENTRYMO
         where coalesce(ZISFULLYREMOVED,0)=0 and coalesce(ZRECENTLYDELETED,0)=0
@@ -146,42 +180,70 @@ def fetch(conn, since=None, until=None, include_empty=False):
     texts  = rtf_batch([r["ZTEXT"] for r in rows])
     out = []
     for r, ti, tx in zip(rows, titles, texts):
-        if r["ZENTRYDATE"] is None:
-            continue
+        if r["ZENTRYDATE"] is None: continue
         dt = datetime.datetime.fromtimestamp(r["ZENTRYDATE"] + EPOCH)
         if since and dt < since: continue
         if until and dt > until: continue
         if not include_empty and not tx.strip() and not ti.strip(): continue
-        out.append({"id": r["Z_PK"],
+        out.append({"id": r["Z_PK"], "uuid": u_str(r["ZID"]),
                     "date": dt.isoformat(sep=" ", timespec="seconds"),
-                    "title": ti, "text": tx,
-                    "chars": r["ZTEXTLENGTH"] or 0,
-                    "bookmarked": bool(r["ZFLAGGED"]),
-                    "draft": bool(r["ZISDRAFT"]),
+                    "title": ti, "text": tx, "chars": r["ZTEXTLENGTH"] or 0,
+                    "bookmarked": bool(r["ZFLAGGED"]), "draft": bool(r["ZISDRAFT"]),
                     "synced": bool(r["ZISUPLOADEDTOCLOUD"])})
     return out
 
-def attachments_for(conn, pk):
+def fetch_one(conn, pk):
+    """Single entry, without decoding RTF for the whole library."""
+    r = conn.execute("""
+        select Z_PK, ZID, ZENTRYDATE, ZTEXTLENGTH, ZFLAGGED, ZISDRAFT,
+               ZISUPLOADEDTOCLOUD, ZTITLE, ZTEXT
+        from ZJOURNALENTRYMO where Z_PK=?""", (pk,)).fetchone()
+    if not r: return None
+    ti, tx = rtf_batch([r["ZTITLE"], r["ZTEXT"]])
+    dt = datetime.datetime.fromtimestamp(r["ZENTRYDATE"] + EPOCH) if r["ZENTRYDATE"] else None
+    return {"id": r["Z_PK"], "uuid": u_str(r["ZID"]),
+            "date": dt.isoformat(sep=" ", timespec="seconds") if dt else None,
+            "title": ti, "text": tx, "chars": r["ZTEXTLENGTH"] or 0,
+            "bookmarked": bool(r["ZFLAGGED"]), "draft": bool(r["ZISDRAFT"]),
+            "synced": bool(r["ZISUPLOADEDTOCLOUD"])}
+
+def assets_for(conn, pk):
     rows = conn.execute("""
-        select fa.ZFILEPATH, fa.ZNAME, a.ZASSETTYPE
-        from ZJOURNALENTRYASSETMO a
-        join ZJOURNALENTRYASSETFILEATTACHMENTMO fa on fa.ZASSET = a.Z_PK
-        where a.ZENTRY = ? order by fa.ZINDEX""", (pk,)).fetchall()
+        select Z_PK, ZID, ZASSETTYPE, ZSOURCE, ZASSETMETADATA
+        from ZJOURNALENTRYASSETMO where ZENTRY=? order by Z_PK""", (pk,)).fetchall()
     out = []
     for r in rows:
-        p = r["ZFILEPATH"]
-        if not p: continue
-        full = p if os.path.isabs(p) else os.path.join(ATTACH, p)
-        out.append({"path": full, "name": r["ZNAME"], "type": r["ZASSETTYPE"],
-                    "exists": os.path.exists(full)})
+        m = parse_meta(r["ZASSETMETADATA"])
+        if not isinstance(m, dict): m = {}
+        a = {"id": r["Z_PK"], "uuid": u_str(r["ZID"]), "type": r["ZASSETTYPE"],
+             "source": r["ZSOURCE"], "files": []}
+        if r["ZASSETTYPE"] in ("multiPinMap", "genericMap"):
+            visits = m.get("visitsData") or []
+            if not isinstance(visits, list): visits = []
+            a["places"] = [{"name": v.get("placeName"), "city": v.get("city"),
+                            "lat": v.get("latitude"), "lon": v.get("longitude")}
+                           for v in visits
+                           if isinstance(v, dict) and v.get("latitude") is not None]
+        elif isinstance(m, dict) and "latitude" in m:
+            a["place"] = {"name": m.get("placeName"), "lat": m.get("latitude"),
+                          "lon": m.get("longitude")}
+        for f in conn.execute("""select ZFILEPATH, ZNAME, ZINDEX
+                                 from ZJOURNALENTRYASSETFILEATTACHMENTMO
+                                 where ZASSET=? order by ZINDEX""", (r["Z_PK"],)):
+            p = f["ZFILEPATH"]
+            if not p: continue
+            full = p if os.path.isabs(p) else os.path.join(attach_dir(), p)
+            a["files"].append({"path": full, "name": f["ZNAME"],
+                               "exists": os.path.exists(full)})
+        out.append(a)
     return out
 
 
-# ---------------------------------------------------------------- read cmds
+# ---------------------------------------------------------------- read commands
 
 def parse_date(s):
     if not s: return None
-    for f in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+    for f in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
         try: return datetime.datetime.strptime(s, f)
         except ValueError: pass
     die(f"cannot parse date {s!r} (use YYYY-MM-DD)")
@@ -208,21 +270,25 @@ def cmd_list(a):
 
 def cmd_show(a):
     with Snapshot() as c:
-        e = next((x for x in fetch(c, include_empty=True) if x["id"] == a.id), None)
+        e = fetch_one(c, a.id)
         if not e: die(f"no entry with id {a.id}")
-        e["attachments"] = attachments_for(c, a.id)
+        e["assets"] = assets_for(c, a.id)
     if a.json:
         print(json.dumps(e, indent=2, ensure_ascii=False)); return
-    print(f"id      {e['id']}\ndate    {e['date']}")
+    print(f"id      {e['id']}\nuuid    {e['uuid']}\ndate    {e['date']}")
     if e["title"]: print(f"title   {e['title']}")
     flags = [k for k in ("bookmarked", "draft") if e[k]] + ([] if e["synced"] else ["unsynced"])
     if flags: print(f"flags   {', '.join(flags)}")
     print()
     print(e["text"] or "(no text)")
-    if e["attachments"]:
-        print(f"\nattachments ({len(e['attachments'])}):")
-        for at in e["attachments"]:
-            print(f"  {'ok' if at['exists'] else 'MISSING':<8}{at['type'] or '?':<10} {at['path']}")
+    for asset in e["assets"]:
+        if asset.get("places"):
+            for p in asset["places"]:
+                loc = ", ".join(x for x in (p.get("name"), p.get("city")) if x)
+                print(f"\nlocation  {loc or '(unnamed)'}  "
+                      f"({p.get('lat')}, {p.get('lon')})")
+        for f in asset["files"]:
+            print(f"\n{asset['type']:<12}{'ok' if f['exists'] else 'MISSING':<8}{f['path']}")
 
 def cmd_search(a):
     q = a.query.lower()
@@ -234,60 +300,118 @@ def cmd_export(a):
     os.makedirs(a.dir, exist_ok=True)
     with Snapshot() as c:
         ents = fetch(c)
-        if a.format == "json":
-            for e in ents: e["attachments"] = attachments_for(c, e["id"])
-            p = os.path.join(a.dir, "journal.json")
-            json.dump(ents, open(p, "w"), indent=2, ensure_ascii=False)
-            print(f"Wrote {len(ents)} entries to {p}"); return
-        for e in ents:
-            slug = "".join(ch if ch.isalnum() or ch in "-_ " else "" for ch in (e["title"] or ""))
-            slug = slug[:50].strip().replace(" ", "-")
-            name = f"{e['date'][:10]}-{e['id']}{('-'+slug) if slug else ''}.md"
-            with open(os.path.join(a.dir, name), "w") as f:
-                f.write(f"---\ndate: {e['date']}\nid: {e['id']}\n")
-                if e["title"]: f.write(f"title: {json.dumps(e['title'])}\n")
-                if e["bookmarked"]: f.write("bookmarked: true\n")
-                f.write("---\n\n" + e["text"] + "\n")
-        print(f"Wrote {len(ents)} entries to {a.dir}")
+        for e in ents: e["assets"] = assets_for(c, e["id"])
+    if a.format == "json":
+        p = os.path.join(a.dir, "journal.json")
+        json.dump(ents, open(p, "w"), indent=2, ensure_ascii=False)
+        print(f"Wrote {len(ents)} entries to {p}"); return
+    for e in ents:
+        slug = "".join(ch if ch.isalnum() or ch in "-_ " else "" for ch in (e["title"] or ""))
+        slug = slug[:50].strip().replace(" ", "-")
+        name = f"{e['date'][:10]}-{e['id']}{('-'+slug) if slug else ''}.md"
+        with open(os.path.join(a.dir, name), "w") as f:
+            f.write(f"---\ndate: {e['date']}\nid: {e['id']}\n")
+            if e["title"]: f.write(f"title: {json.dumps(e['title'])}\n")
+            if e["bookmarked"]: f.write("bookmarked: true\n")
+            places = [p for asset in e["assets"] for p in asset.get("places", [])]
+            if places:
+                f.write("locations:\n")
+                for p in places:
+                    f.write(f"  - name: {json.dumps(p.get('name'))}\n"
+                            f"    lat: {p.get('lat')}\n    lon: {p.get('lon')}\n")
+            f.write("---\n\n" + e["text"] + "\n")
+            files = [x for asset in e["assets"] for x in asset["files"]]
+            if files:
+                f.write("\n")
+                for x in files:
+                    f.write(f"![{x['name']}]({x['path']})\n")
+    print(f"Wrote {len(ents)} entries to {a.dir}")
 
 def cmd_stats(a):
     with Snapshot() as c:
         ents = fetch(c, include_empty=True)
         n_at = c.execute("select count(*) from ZJOURNALENTRYASSETFILEATTACHMENTMO").fetchone()[0]
+        n_loc = c.execute("""select count(*) from ZJOURNALENTRYASSETMO
+                             where ZASSETTYPE in ('multiPinMap','genericMap')""").fetchone()[0]
     real = [e for e in ents if e["text"].strip()]
     by_year = {}
     for e in real: by_year[e["date"][:4]] = by_year.get(e["date"][:4], 0) + 1
     print(f"entries      {len(real)} with text ({len(ents)} rows total)")
     print(f"words        {sum(len(e['text'].split()) for e in real):,}")
     print(f"attachments  {n_at}")
+    print(f"locations    {n_loc}")
     if real: print(f"range        {real[-1]['date'][:10]} .. {real[0]['date'][:10]}")
     print("\nby year")
     for y in sorted(by_year):
         print(f"  {y}  {by_year[y]:>4}  {'#' * min(by_year[y], 50)}")
 
 
-# ---------------------------------------------------------------- write cmds
+# ---------------------------------------------------------------- write
 
-def next_pk(conn, entity=ENT_ENTRY):
-    row = conn.execute("select Z_ENT, Z_MAX from Z_PRIMARYKEY where Z_NAME=?", (entity,)).fetchone()
-    if not row: die(f"entity {entity} not in Z_PRIMARYKEY")
+def next_pk(conn, kind):
+    name = ENT[kind]
+    row = conn.execute("select Z_ENT, Z_MAX from Z_PRIMARYKEY where Z_NAME=?", (name,)).fetchone()
+    if not row: die(f"entity {name} missing from Z_PRIMARYKEY")
     pk = row["Z_MAX"] + 1
-    conn.execute("update Z_PRIMARYKEY set Z_MAX=? where Z_NAME=?", (pk, entity))
+    conn.execute("update Z_PRIMARYKEY set Z_MAX=? where Z_NAME=?", (pk, name))
     return row["Z_ENT"], pk
+
+def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0):
+    ent, pk = next_pk(conn, "asset")
+    au = uid()
+    conn.execute("""
+        insert into ZJOURNALENTRYASSETMO
+          (Z_PK, Z_ENT, Z_OPT, ZENTRY, ZID, ZPARENTID, ZASSETTYPE, ZSOURCE,
+           ZCREATEDDATE, ZASSETMETADATA, ZISSLIM, ZISHIDDEN, ZISBEINGEDITED,
+           ZISUNDOABLYDELETED, ZISUPLOADEDTOCLOUD, ZISREMOVEDFROMCLOUD,
+           ZREFRESHASSETMETADATA, ZMINIMUMSUPPORTEDAPPVERSION)
+        values (?,?,1,?,?,?,?,?,?,?,?,0,0,0,0,0,0,0)""",
+        (pk, ent, entry_pk, uid_bytes(au), uid_bytes(entry_uuid), asset_type, source,
+         cd_now(), meta_blob(metadata) if metadata is not None else None, slim))
+    return pk, au
+
+def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index):
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext in VIDEO_EXT: name = "video"
+    elif ext in PHOTO_EXT: name = "image"
+    else: die(f"unsupported media type {ext!r} ({src_path})")
+    rel_dir = os.path.join(entry_uuid, asset_uuid)
+    abs_dir = os.path.join(attach_dir(), rel_dir)
+    os.makedirs(abs_dir, exist_ok=True)
+    fname = f"{uid()}_resized{ext}"
+    shutil.copy2(src_path, os.path.join(abs_dir, fname))
+    ent, pk = next_pk(conn, "file")
+    conn.execute("""
+        insert into ZJOURNALENTRYASSETFILEATTACHMENTMO
+          (Z_PK, Z_ENT, Z_OPT, ZASSET, ZID, ZPARENTID, ZFILEPATH, ZNAME, ZINDEX,
+           ZISUPLOADEDTOCLOUD, ZISREMOVEDFROMCLOUD)
+        values (?,?,1,?,?,?,?,?,?,0,0)""",
+        (pk, ent, asset_pk, uid_bytes(uid()), uid_bytes(asset_uuid),
+         os.path.join(rel_dir, fname), name, index))
+    return pk
 
 def cmd_write(a):
     body = a.body
     if a.body_file: body = open(a.body_file, errors="replace").read()
-    if body is None and not sys.stdin.isatty(): body = sys.stdin.read()
-    if not body or not body.strip(): die("nothing to write (--body, --body-file, or stdin)")
+    if body is None and stdin_has_data(): body = sys.stdin.read()
+    media = [os.path.abspath(os.path.expanduser(m)) for m in (a.media or [])]
+    for m in media:
+        if not os.path.exists(m): die(f"media file not found: {m}")
+    has_loc = a.lat is not None or a.lon is not None
+    if has_loc and (a.lat is None or a.lon is None):
+        die("--lat and --lon must be given together")
+    if not (body and body.strip()) and not media and not has_loc:
+        die("nothing to write (need --body/--body-file/stdin, --media, or --lat/--lon)")
+    body = body or ""
 
     when = parse_date(a.date) if a.date else datetime.datetime.now()
-    ts = when.timestamp() - EPOCH
-    rtf = txt_to_rtf(body)
+    ts = cd(when)
+    rtf = txt_to_rtf(body) if body.strip() else None
     title_rtf = txt_to_rtf(a.title) if a.title else None
+    entry_uuid = uid()
 
     with Live(allow_live_default=a.live) as conn:
-        ent, pk = next_pk(conn)
+        ent, pk = next_pk(conn, "entry")
         conn.execute("""
             insert into ZJOURNALENTRYMO
               (Z_PK, Z_ENT, Z_OPT, ZENTRYTYPE, ZID,
@@ -297,28 +421,58 @@ def cmd_write(a):
                ZISFULLYREMOVED, ZRECENTLYDELETED, ZISTIP,
                ZMINIMUMSUPPORTEDAPPVERSION, ZMINIMUMSUPPORTEDAPPVERSIONMODE)
             values (?,?,1,'blankEntry',?, ?,?,?,?, ?,?,?,?, 0,?,0,0, 0,0,0, 0,0)""",
-            (pk, ent, uuid.uuid4().bytes,
-             ts, cd_now(), cd_now(), ts,
-             rtf, title_rtf, len(body), 1 if a.title else 0,
-             1 if a.bookmark else 0))
-        # attach to the default journal if that join table is in use
-        jrow = conn.execute("select Z_PK from ZJOURNALMO limit 1").fetchone()
-        if jrow and conn.execute("select count(*) from Z_5JOURNALS").fetchone()[0]:
-            conn.execute("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
-                         (pk, jrow["Z_PK"]))
-    print(f"Created entry {pk} ({len(body)} chars) dated {when:%Y-%m-%d %H:%M}.")
-    if a.live:
-        print("Marked unsynced; Journal.app should upload it on next launch.", file=sys.stderr)
+            (pk, ent, uid_bytes(entry_uuid), ts, cd_now(), cd_now(), ts,
+             rtf, title_rtf, len(body), 1 if a.title else 0, 1 if a.bookmark else 0))
+
+        ordering = []
+        for i, m in enumerate(media):
+            ext = os.path.splitext(m)[1].lower()
+            atype = "video" if ext in VIDEO_EXT else "photo"
+            meta = {"date": ts}
+            if has_loc:
+                meta.update({"latitude": a.lat, "longitude": a.lon})
+                if a.place: meta["placeName"] = a.place
+            apk, au = add_asset(conn, pk, entry_uuid, atype, "imagePicker", meta)
+            add_file(conn, apk, au, entry_uuid, m, 0)
+            ordering += [au, i]
+
+        if has_loc:
+            visit = {"latitude": a.lat, "longitude": a.lon,
+                     "createdDate": cd_now(), "visitStartTime": ts, "visitEndTime": ts,
+                     "horizontalAccuracy": 0, "confidenceLevel": 0,
+                     "assetSource": "locationPicker"}
+            if a.place: visit["placeName"] = a.place
+            if a.city:  visit["city"] = a.city
+            _, au = add_asset(conn, pk, entry_uuid, "multiPinMap", "locationPicker",
+                              {"revision": 2, "visitsData": [visit]}, slim=1)
+            ordering += [au, len(media)]
+
+        if ordering:
+            conn.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",
+                         (json.dumps(ordering).encode(), pk))
+
+    bits = [f"{len(body)} chars"] if body.strip() else []
+    if media: bits.append(f"{len(media)} media")
+    if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
+    print(f"Created entry {pk} ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}.")
 
 def cmd_delete(a):
     with Live(allow_live_default=a.live) as conn:
-        row = conn.execute("select Z_PK, ZTEXTLENGTH from ZJOURNALENTRYMO where Z_PK=?",
-                           (a.id,)).fetchone()
+        row = conn.execute("select Z_PK, ZID from ZJOURNALENTRYMO where Z_PK=?", (a.id,)).fetchone()
         if not row: die(f"no entry with id {a.id}")
         if a.hard:
+            apks = [r[0] for r in conn.execute(
+                "select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", (a.id,))]
+            for apk in apks:
+                conn.execute("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", (apk,))
+            conn.execute("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", (a.id,))
             conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (a.id,))
             conn.execute("delete from ZJOURNALENTRYMO where Z_PK=?", (a.id,))
-            what = "hard-deleted"
+            eu = u_str(row["ZID"])
+            if eu:
+                d = os.path.join(attach_dir(), eu)
+                if os.path.isdir(d): shutil.rmtree(d, ignore_errors=True)
+            what = f"hard-deleted (with {len(apks)} assets)"
         else:
             conn.execute("""update ZJOURNALENTRYMO
                             set ZRECENTLYDELETED=1, ZRECENTLYDELETEDENTRYDATE=?, ZUPDATEDDATE=?
@@ -327,14 +481,21 @@ def cmd_delete(a):
     print(f"Entry {a.id} {what}.")
 
 def cmd_sandbox(a):
+    """Seed a throwaway store. --from lets tests run off a backup without FDA."""
+    src = os.path.expanduser(a.source) if a.source else DEFAULT_DB
+    if not os.path.exists(src):
+        die(f"source store not found: {src}")
     os.makedirs(a.dir, exist_ok=True)
-    base = os.path.basename(DEFAULT_DB)
-    for suf in ("", "-wal", "-shm"):
-        if os.path.exists(DEFAULT_DB + suf):
-            shutil.copy2(DEFAULT_DB + suf, os.path.join(a.dir, base + suf))
-    p = os.path.join(a.dir, base)
-    print(p)
-
+    base = "moments.sqlite"
+    try:
+        for suf in ("", "-wal", "-shm"):
+            if os.path.exists(src + suf):
+                shutil.copy2(src + suf, os.path.join(a.dir, base + suf))
+    except PermissionError:
+        die(f"permission denied reading {src}\n"
+            "  Grant Full Disk Access, or seed from a backup with --from.")
+    os.makedirs(os.path.join(a.dir, "Attachments"), exist_ok=True)
+    print(os.path.join(a.dir, base))
 
 def cmd_doctor(a):
     ok = True
@@ -346,7 +507,7 @@ def cmd_doctor(a):
         print(f"         readable, {os.path.getsize(DB)/1e6:.1f} MB")
     except PermissionError:
         print("         PERMISSION DENIED - grant Full Disk Access"); ok = False
-    print(f"attach   {ATTACH}  " + ("ok" if os.path.isdir(ATTACH) else "missing"))
+    print(f"attach   {attach_dir()}  " + ("ok" if os.path.isdir(attach_dir()) else "missing"))
     print("textutil " + ("found" if shutil.which("textutil") else "MISSING"))
     print("Journal  " + ("RUNNING (quit before writing)" if journal_running() else "not running"))
     if ok:
@@ -358,8 +519,7 @@ def cmd_doctor(a):
 def main():
     global DB
     p = argparse.ArgumentParser(prog="journal-cli", description=__doc__.splitlines()[0])
-    p.add_argument("--db", default=os.environ.get("JOURNAL_DB", DEFAULT_DB),
-                   help="store to operate on (default: the real Journal store)")
+    p.add_argument("--db", default=os.environ.get("JOURNAL_DB", DEFAULT_DB))
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def readopts(x):
@@ -385,17 +545,21 @@ def main():
     w = sub.add_parser("write", help="create an entry")
     w.add_argument("--title"); w.add_argument("--body"); w.add_argument("--body-file")
     w.add_argument("--date"); w.add_argument("--bookmark", action="store_true")
+    w.add_argument("--media", nargs="+", metavar="PATH", help="photos or videos to attach")
+    w.add_argument("--lat", type=float); w.add_argument("--lon", type=float)
+    w.add_argument("--place", help="place name for the location pin")
+    w.add_argument("--city")
     w.add_argument("--live", action="store_true", help="allow writing to the real store")
     w.set_defaults(func=cmd_write)
 
-    d = sub.add_parser("delete", help="delete an entry")
-    d.add_argument("id", type=int)
-    d.add_argument("--hard", action="store_true", help="remove the row instead of soft-delete")
-    d.add_argument("--live", action="store_true")
+    d = sub.add_parser("delete"); d.add_argument("id", type=int)
+    d.add_argument("--hard", action="store_true"); d.add_argument("--live", action="store_true")
     d.set_defaults(func=cmd_delete)
 
-    sb = sub.add_parser("sandbox", help="copy the store somewhere safe for testing")
-    sb.add_argument("--dir", required=True); sb.set_defaults(func=cmd_sandbox)
+    sb = sub.add_parser("sandbox"); sb.add_argument("--dir", required=True)
+    sb.add_argument("--from", dest="source", metavar="DB",
+                    help="seed from this store instead of the live one (e.g. a backup)")
+    sb.set_defaults(func=cmd_sandbox)
 
     a = p.parse_args()
     DB = os.path.expanduser(a.db)
