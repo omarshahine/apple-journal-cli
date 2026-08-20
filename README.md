@@ -106,31 +106,35 @@ local content.
 
 ### Verified behaviour
 
-A live round trip was tested end to end on macOS 26.6.2 (text entry):
+Text, photo and location writes have all been confirmed end to end on
+macOS 26.6.2 against a real library:
 
-1. `journal-cli write --live` inserted the row.
-2. Journal.app rendered it natively, and the Insights word count updated.
-3. Within ~60s the sync engine flipped `ZISUPLOADEDTOCLOUD` to `1` and wrote
-   back ~1,950 bytes of `ZRECORDSYSTEMFIELDS` — CloudKit accepted it.
-4. A `--hard` delete removed it, and it did not return across a Journal
-   relaunch and resync.
+1. `journal-cli write --live --media pic.jpg --lat .. --lon .. --place ..`
+   inserted an entry, a `photo` asset, a `multiPinMap` asset and a file
+   attachment, and copied the image into `Attachments/`.
+2. Journal.app rendered the entry natively — photo displayed full width, a
+   location chip reading "Space Needle · Seattle", title and body intact.
+3. The sidebar **Places** counter incremented (481 -> 483), so Journal ingested
+   the pin into its own location index rather than merely displaying it.
+4. Within ~60s every row synced: entry, both assets and the file attachment all
+   flipped `ZISUPLOADEDTOCLOUD` to `1` and received ~1,900-1,970 bytes of
+   `ZRECORDSYSTEMFIELDS`. CloudKit accepted the image upload too.
+5. A `--hard` delete removed the entry, both assets and the attachment
+   directory. It did not return across a Journal relaunch and resync.
 
-So Journal's sync engine adopts rows it did not create, provided the Core Data
-bookkeeping is right.
+So Journal's sync engine fully adopts rows and files it did not create,
+provided the Core Data bookkeeping is right.
 
 ### Known limits
 
-- **Media and location writes are schema-verified, not app-verified.** The 45
-  tests confirm the rows, blobs, file layout and round-trip reads match what
-  Journal itself produces, but I have not yet seen Journal.app render a
-  hand-written photo or map pin. Only the text path has been confirmed in the
-  app and in CloudKit. Treat media/location writes as experimental.
 - Photos are copied as-is. Journal's own `_resized` files are downscaled
   derivatives; no resizing is performed here.
 - No Photos-library linkage. Real photo assets carry an `assetIdentifier`
   pointing into the Photos database; written ones do not.
-- Deleting a synced row is only partly verified — the CloudKit record may be
-  orphaned rather than tombstoned. Prefer deleting through Journal.app.
+- Deleting a synced row is only partly verified. Locally it is clean and the
+  entry does not come back after a resync, but whether the CloudKit record is
+  tombstoned or merely orphaned was not confirmed, and other devices were not
+  checked. Prefer deleting through Journal.app when in doubt.
 - Live writes need Full Disk Access, which macOS can revoke; see below.
 
 ## Tests
