@@ -456,6 +456,116 @@ def cmd_write(a):
     if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
     print(f"Created entry {pk} ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}.")
 
+def ordering_append(conn, pk, new_uuids):
+    """Append asset UUIDs to ZASSETORDERING, preserving existing order."""
+    row = conn.execute("select ZASSETORDERING from ZJOURNALENTRYMO where Z_PK=?", (pk,)).fetchone()
+    cur = []
+    if row and row[0]:
+        try: cur = json.loads(row[0])
+        except Exception: cur = []
+    nxt = (max([cur[i] for i in range(1, len(cur), 2)], default=-1)) + 1
+    for u in new_uuids:
+        cur += [u, nxt]; nxt += 1
+    conn.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",
+                 (json.dumps(cur).encode(), pk))
+
+def ordering_drop(conn, pk, gone_uuids):
+    row = conn.execute("select ZASSETORDERING from ZJOURNALENTRYMO where Z_PK=?", (pk,)).fetchone()
+    if not row or not row[0]: return
+    try: cur = json.loads(row[0])
+    except Exception: return
+    out = []
+    for i in range(0, len(cur) - 1, 2):
+        if cur[i] not in gone_uuids:
+            out += [cur[i], cur[i + 1]]
+    conn.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",
+                 (json.dumps(out).encode(), pk))
+
+def cmd_edit(a):
+    body = a.body
+    if a.body_file: body = open(a.body_file, errors="replace").read()
+    if body is None and stdin_has_data(): body = sys.stdin.read()
+
+    media = [os.path.abspath(os.path.expanduser(m)) for m in (a.add_media or [])]
+    for m in media:
+        if not os.path.exists(m): die(f"media file not found: {m}")
+    has_loc = a.lat is not None or a.lon is not None
+    if has_loc and (a.lat is None or a.lon is None):
+        die("--lat and --lon must be given together")
+    bookmark = True if a.bookmark else (False if a.no_bookmark else None)
+    touches_text = body is not None or a.title is not None
+    if not any([touches_text, media, has_loc, a.clear_location,
+                a.date is not None, bookmark is not None]):
+        die("nothing to change")
+
+    with Live(allow_live_default=a.live) as conn:
+        row = conn.execute("""select Z_PK, ZID, ZMERGEABLEATTRIBUTES
+                              from ZJOURNALENTRYMO where Z_PK=?""", (a.id,)).fetchone()
+        if not row: die(f"no entry with id {a.id}")
+        entry_uuid = u_str(row["ZID"])
+
+        if touches_text and row["ZMERGEABLEATTRIBUTES"] is not None and not a.force:
+            die(f"entry {a.id} carries a ZMERGEABLEATTRIBUTES CRDT (Journal's merge copy\n"
+                "  of the text). Editing ZTEXT alone can be reverted or duplicated on sync.\n"
+                "  Change location/media/date/bookmark freely, edit the text in Journal.app,\n"
+                "  or pass --force to write ZTEXT anyway.")
+
+        sets, vals = [], []
+        if body is not None:
+            sets += ["ZTEXT=?", "ZTEXTLENGTH=?"]; vals += [txt_to_rtf(body) if body.strip() else None, len(body)]
+        if a.title is not None:
+            sets += ["ZTITLE=?", "ZSHOWTITLE=?"]
+            vals += [txt_to_rtf(a.title) if a.title.strip() else None, 1 if a.title.strip() else 0]
+        if a.date is not None:
+            ts = cd(parse_date(a.date))
+            sets += ["ZENTRYDATE=?", "ZMOMENTDATEFORSORTING=?"]; vals += [ts, ts]
+        if bookmark is not None:
+            sets += ["ZFLAGGED=?"]; vals += [1 if bookmark else 0]
+        sets += ["ZUPDATEDDATE=?", "ZENTRYDATAUPDATEDATE=?", "ZISUPLOADEDTOCLOUD=0"]
+        vals += [cd_now(), cd_now()]
+        conn.execute(f"update ZJOURNALENTRYMO set {', '.join(sets)} where Z_PK=?", (*vals, a.id))
+
+        if a.clear_location or has_loc:
+            gone = []
+            for r in conn.execute("""select Z_PK, ZID from ZJOURNALENTRYASSETMO
+                                     where ZENTRY=? and ZASSETTYPE in ('multiPinMap','genericMap')""", (a.id,)):
+                gone.append(u_str(r["ZID"]))
+                conn.execute("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", (r["Z_PK"],))
+                conn.execute("delete from ZJOURNALENTRYASSETMO where Z_PK=?", (r["Z_PK"],))
+            if gone: ordering_drop(conn, a.id, gone)
+
+        added = []
+        for m in media:
+            ext = os.path.splitext(m)[1].lower()
+            atype = "video" if ext in VIDEO_EXT else "photo"
+            apk, au = add_asset(conn, a.id, entry_uuid, atype, "imagePicker", {"date": cd_now()})
+            add_file(conn, apk, au, entry_uuid, m, 0)
+            added.append(au)
+
+        if has_loc:
+            ets = conn.execute("select ZENTRYDATE from ZJOURNALENTRYMO where Z_PK=?", (a.id,)).fetchone()[0]
+            visit = {"latitude": a.lat, "longitude": a.lon, "createdDate": cd_now(),
+                     "visitStartTime": ets, "visitEndTime": ets,
+                     "horizontalAccuracy": 0, "confidenceLevel": 0,
+                     "assetSource": "locationPicker"}
+            if a.place: visit["placeName"] = a.place
+            if a.city:  visit["city"] = a.city
+            _, au = add_asset(conn, a.id, entry_uuid, "multiPinMap", "locationPicker",
+                              {"revision": 2, "visitsData": [visit]}, slim=1)
+            added.append(au)
+
+        if added: ordering_append(conn, a.id, added)
+
+    bits = []
+    if body is not None: bits.append("body")
+    if a.title is not None: bits.append("title")
+    if a.date is not None: bits.append("date")
+    if bookmark is not None: bits.append("bookmark=" + str(bookmark).lower())
+    if a.clear_location and not has_loc: bits.append("location cleared")
+    if has_loc: bits.append("location set")
+    if media: bits.append(f"{len(media)} media added")
+    print(f"Updated entry {a.id} ({', '.join(bits)}).")
+
 def cmd_delete(a):
     with Live(allow_live_default=a.live) as conn:
         row = conn.execute("select Z_PK, ZID from ZJOURNALENTRYMO where Z_PK=?", (a.id,)).fetchone()
@@ -551,6 +661,21 @@ def main():
     w.add_argument("--city")
     w.add_argument("--live", action="store_true", help="allow writing to the real store")
     w.set_defaults(func=cmd_write)
+
+    ed = sub.add_parser("edit", help="modify an existing entry")
+    ed.add_argument("id", type=int)
+    ed.add_argument("--title"); ed.add_argument("--body"); ed.add_argument("--body-file")
+    ed.add_argument("--date")
+    ed.add_argument("--bookmark", action="store_true")
+    ed.add_argument("--no-bookmark", action="store_true")
+    ed.add_argument("--add-media", nargs="+", metavar="PATH")
+    ed.add_argument("--lat", type=float); ed.add_argument("--lon", type=float)
+    ed.add_argument("--place"); ed.add_argument("--city")
+    ed.add_argument("--clear-location", action="store_true")
+    ed.add_argument("--force", action="store_true",
+                    help="edit text even when the entry has a CRDT copy")
+    ed.add_argument("--live", action="store_true")
+    ed.set_defaults(func=cmd_edit)
 
     d = sub.add_parser("delete"); d.add_argument("id", type=int)
     d.add_argument("--hard", action="store_true"); d.add_argument("--live", action="store_true")

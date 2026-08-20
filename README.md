@@ -81,6 +81,13 @@ journal-cli write --live --title "Waikiki" --body "..." \
 
 journal-cli write --live --title "Notes" --body-file notes.txt
 
+# edit an existing entry
+journal-cli edit 103 --live --body "Rewritten." --title "New title"
+journal-cli edit 103 --live --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle
+journal-cli edit 103 --live --add-media ~/Pictures/b.heic
+journal-cli edit 103 --live --clear-location
+journal-cli edit 103 --live --date 2024-03-05 --bookmark   # or --no-bookmark
+
 journal-cli delete 103 --live          # soft delete (Recently Deleted)
 journal-cli delete 103 --live --hard   # remove row, assets, and files
 ```
@@ -140,7 +147,10 @@ macOS 26.6.2 against a real library:
 4. Within ~60s every row synced: entry, both assets and the file attachment all
    flipped `ZISUPLOADEDTOCLOUD` to `1` and received ~1,900-1,970 bytes of
    `ZRECORDSYSTEMFIELDS`. CloudKit accepted the image upload too.
-5. A `--hard` delete removed the entry, both assets and the attachment
+5. `edit` was confirmed the same way: an entry created without a location had
+   its body rewritten and a pin added, and Journal showed both the new text and
+   a "Space Needle - Seattle" chip. The edit re-synced to CloudKit.
+6. A `--hard` delete removed the entry, its assets and the attachment
    directory. It did not return across a Journal relaunch and resync.
 
 So Journal's sync engine fully adopts rows and files it did not create,
@@ -170,14 +180,17 @@ attached files, but do not decode its type-specific payload and cannot create on
 
 Beyond assets:
 
-- **No editing.** There is no `edit` command. You cannot change an existing
-  entry's text, title, date or bookmark, and you cannot add media or a location
-  to an entry that already exists. Write a new entry, or edit in the app.
-- **No `ZMERGEABLEATTRIBUTES`.** Journal keeps a second copy of the entry text
-  in a CRDT blob (magic `crdt`, a protobuf) used for merge-safe multi-device
-  editing. Written entries have `ZTEXT` only. Journal renders and syncs them
-  fine, but concurrent edits on two devices may not merge the way a
-  natively-created entry would.
+- **Text edits are blocked on CRDT entries by default.** Journal keeps a second
+  copy of the entry text in a `ZMERGEABLEATTRIBUTES` CRDT blob (magic `crdt`, a
+  protobuf) for merge-safe multi-device editing. Roughly half a real library has
+  one. `edit` refuses to rewrite `ZTEXT` on those entries unless you pass
+  `--force`, since the CRDT copy may win on sync. Location, media, date and
+  bookmark edits are unaffected — none of them live in the CRDT.
+- **Written entries have no CRDT.** They carry `ZTEXT` only. Journal renders and
+  syncs them fine and does not backfill one, but concurrent edits on two devices
+  may not merge the way a natively-created entry would.
+- **No media removal.** `edit --clear-location` removes location; there is no
+  equivalent for photos or videos short of deleting the entry.
 - **No multiple journals.** Journal supports several journals; new entries go to
   the first one in `ZJOURNALMO`.
 - **No Recently Deleted management.** `delete` without `--hard` moves an entry
@@ -209,10 +222,10 @@ tests/test_write.sh                                   # seeds from the live stor
 JOURNAL_SEED=~/Backups/journal-cli/<ts>/moments.sqlite tests/test_write.sh
 ```
 
-45 assertions against a throwaway copy: argument guards, insert bookkeeping,
+63 assertions against a throwaway copy: argument guards, insert bookkeeping,
 RTF round-trip, location metadata and coordinates, photo/video asset rows,
 attachment file layout on disk, asset ordering, Markdown export of media and
-locations, soft and hard delete, `PRAGMA integrity_check`, and a check that the
+locations, every `edit` operation and its CRDT guard, soft and hard delete, `PRAGMA integrity_check`, and a check that the
 source store never moved.
 
 `JOURNAL_SEED` runs the whole suite off a backup, so tests need no Full Disk

@@ -98,7 +98,45 @@ ok "media linked for media entry" "$(grep -l '_resized' "$EXP"/*-"$MPK"*.md 2>/d
 ok "media linked for combo entry" "$(grep -l '_resized' "$EXP"/*-"$BPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
 ok "location scoped to its entry" "$(grep -l 'Space Needle' "$EXP"/*-"$LPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
 
-echo "T7 delete"
+echo "T7 edit"
+EOUT=$("$CLI" --db "$DB" write --body "Original body." --title "Original" 2>&1)
+EPK=$(echo "$EOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+"$CLI" --db "$DB" edit $EPK --body "Rewritten body." --title "Rewritten" >/dev/null 2>&1
+ok "body updated" "$("$CLI" --db "$DB" show $EPK --json | jq_ 'd["text"]')" "Rewritten body."
+ok "title updated" "$("$CLI" --db "$DB" show $EPK --json | jq_ 'd["title"]')" "Rewritten"
+ok "marked unsynced again" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$EPK;")" "0"
+"$CLI" --db "$DB" edit $EPK --bookmark >/dev/null 2>&1
+ok "bookmark on" "$(sqlite3 "$DB" "select ZFLAGGED from ZJOURNALENTRYMO where Z_PK=$EPK;")" "1"
+"$CLI" --db "$DB" edit $EPK --no-bookmark >/dev/null 2>&1
+ok "bookmark off" "$(sqlite3 "$DB" "select ZFLAGGED from ZJOURNALENTRYMO where Z_PK=$EPK;")" "0"
+"$CLI" --db "$DB" edit $EPK --date 2024-03-05 >/dev/null 2>&1
+ok "date updated" "$("$CLI" --db "$DB" show $EPK --json | jq_ 'd["date"][:10]')" "2024-03-05"
+"$CLI" --db "$DB" edit $EPK --lat 51.5007 --lon -0.1246 --place "Big Ben" --city London >/dev/null 2>&1
+ok "location added" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
+ok "location reads back" "$("$CLI" --db "$DB" show $EPK --json | jq_ '[p for a in d["assets"] for p in a.get("places",[])][0]["name"]')" "Big Ben"
+"$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --place "Eiffel Tower" >/dev/null 2>&1
+ok "location replaced not duplicated" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
+"$CLI" --db "$DB" edit $EPK --add-media "$IMG" >/dev/null 2>&1
+ok "media added to existing entry" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='photo';")" "1"
+ok "ordering covers both assets" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING) from ZJOURNALENTRYMO where Z_PK=$EPK;")" "4"
+"$CLI" --db "$DB" edit $EPK --clear-location >/dev/null 2>&1
+ok "location cleared" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "0"
+ok "photo survived clear" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='photo';")" "1"
+ok "ordering pruned" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING) from ZJOURNALENTRYMO where Z_PK=$EPK;")" "2"
+"$CLI" --db "$DB" edit $EPK >/dev/null 2>&1; ok "no-op edit rejected" "$?" "1"
+
+echo "T7b CRDT guard"
+CPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALENTRYMO where ZMERGEABLEATTRIBUTES is not null limit 1;")
+if [ -n "$CPK" ]; then
+  "$CLI" --db "$DB" edit $CPK --body "should be refused" >/dev/null 2>&1
+  ok "text edit refused on CRDT entry" "$?" "1"
+  "$CLI" --db "$DB" edit $CPK --lat 1.0 --lon 2.0 --place Somewhere >/dev/null 2>&1
+  ok "location edit allowed on CRDT entry" "$?" "0"
+  "$CLI" --db "$DB" edit $CPK --body "forced" --force >/dev/null 2>&1
+  ok "--force overrides guard" "$("$CLI" --db "$DB" show $CPK --json | jq_ 'd["text"]')" "forced"
+fi
+
+echo "T7c delete"
 "$CLI" --db "$DB" delete $PK >/dev/null 2>&1
 ok "soft: row kept" "$(sqlite3 "$DB" "select ZRECENTLYDELETED from ZJOURNALENTRYMO where Z_PK=$PK;")" "1"
 ok "soft: hidden" "$("$CLI" --db "$DB" search 'test suite' --json | jq_ 'len(d)')" "0"
