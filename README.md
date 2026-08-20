@@ -72,15 +72,32 @@ A written row gets a fresh `Z_PK`, a bumped `Z_PRIMARYKEY.Z_MAX`, a 16-byte UUID
 `ZID`, RTF body via `textutil`, and `ZISUPLOADEDTOCLOUD=0` so Journal's sync
 engine treats it as new local content.
 
+### Verified behaviour
+
+A live round trip was tested end to end on macOS 26.6.2:
+
+1. `journal-cli write --live` inserted a row with a fresh `Z_PK`, bumped
+   `Z_PRIMARYKEY.Z_MAX`, 16-byte UUID `ZID`, RTF body, `ZISUPLOADEDTOCLOUD=0`.
+2. Journal.app rendered it natively (title + body, correct date section) and
+   the Insights word count updated.
+3. Within ~60s the sync engine flipped `ZISUPLOADEDTOCLOUD` to `1` and wrote
+   back ~1,950 bytes of `ZRECORDSYSTEMFIELDS` — CloudKit accepted the
+   hand-written row.
+
+So Journal's own sync engine adopts rows it did not create, as long as the
+Core Data bookkeeping is right.
+
 ### Known limits
 
-- **Sync is unverified.** The tests prove the row is well-formed and reads back
-  correctly. They do *not* prove Journal.app renders it or that iCloud accepts
-  it. Journal uses its own sync engine (`ZSYNCDATAMO`, `ZRECORDSYSTEMFIELDS`,
-  1,100+ rows of Core Data persistent history), and a hand-inserted row carries
-  no `ZRECORDSYSTEMFIELDS`. Treat live writes as experimental.
+- **Deleting a synced row is only partly verified.** A `--hard` delete of a
+  row with `ZISUPLOADEDTOCLOUD=1` removed it locally and it did not reappear
+  after Journal relaunched and resynced. Whether the CloudKit record is
+  tombstoned or merely orphaned was not confirmed, and other devices were not
+  checked. Prefer deleting through Journal.app for anything already synced.
 - No attachment/photo writing. Text and title only.
 - `--hard` delete does not clean up orphaned assets.
+- GUI automation of Journal.app is unreliable: menu element indexes go stale
+  between accessibility calls. Do not script the UI; use the database.
 
 ## Tests
 
