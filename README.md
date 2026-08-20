@@ -86,6 +86,8 @@ journal-cli edit 103 --live --body "Rewritten." --title "New title"
 journal-cli edit 103 --live --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle
 journal-cli edit 103 --live --add-media ~/Pictures/b.heic
 journal-cli edit 103 --live --clear-location
+journal-cli edit 103 --live --remove-media 700        # asset ids shown by `show 103`
+journal-cli edit 103 --live --remove-all-media
 journal-cli edit 103 --live --date 2024-03-05 --bookmark   # or --no-bookmark
 
 journal-cli delete 103 --live          # soft delete (Recently Deleted)
@@ -189,8 +191,6 @@ Beyond assets:
 - **Written entries have no CRDT.** They carry `ZTEXT` only. Journal renders and
   syncs them fine and does not backfill one, but concurrent edits on two devices
   may not merge the way a natively-created entry would.
-- **No media removal.** `edit --clear-location` removes location; there is no
-  equivalent for photos or videos short of deleting the entry.
 - **No multiple journals.** Journal supports several journals; new entries go to
   the first one in `ZJOURNALMO`.
 - **No Recently Deleted management.** `delete` without `--hard` moves an entry
@@ -222,10 +222,10 @@ tests/test_write.sh                                   # seeds from the live stor
 JOURNAL_SEED=~/Backups/journal-cli/<ts>/moments.sqlite tests/test_write.sh
 ```
 
-63 assertions against a throwaway copy: argument guards, insert bookkeeping,
+72 assertions against a throwaway copy: argument guards, insert bookkeeping,
 RTF round-trip, location metadata and coordinates, photo/video asset rows,
 attachment file layout on disk, asset ordering, Markdown export of media and
-locations, every `edit` operation and its CRDT guard, soft and hard delete, `PRAGMA integrity_check`, and a check that the
+locations, every `edit` operation (including media removal) and its CRDT guard, soft and hard delete, `PRAGMA integrity_check`, and a check that the
 source store never moved.
 
 `JOURNAL_SEED` runs the whole suite off a backup, so tests need no Full Disk

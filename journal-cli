@@ -288,7 +288,8 @@ def cmd_show(a):
                 print(f"\nlocation  {loc or '(unnamed)'}  "
                       f"({p.get('lat')}, {p.get('lon')})")
         for f in asset["files"]:
-            print(f"\n{asset['type']:<12}{'ok' if f['exists'] else 'MISSING':<8}{f['path']}")
+            print(f"\n{asset['type']} (asset {asset['id']})  "
+                  f"{'ok' if f['exists'] else 'MISSING'}  {f['path']}")
 
 def cmd_search(a):
     q = a.query.lower()
@@ -481,6 +482,28 @@ def ordering_drop(conn, pk, gone_uuids):
     conn.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",
                  (json.dumps(out).encode(), pk))
 
+MEDIA_TYPES = {"photo", "video", "livePhoto"}
+
+def remove_assets(conn, entry_pk, entry_uuid, asset_pks):
+    """Remove media asset rows, their file rows, their files, and their ordering slots."""
+    gone_uuids = []
+    for apk in asset_pks:
+        r = conn.execute("""select Z_PK, ZID, ZASSETTYPE from ZJOURNALENTRYASSETMO
+                            where Z_PK=? and ZENTRY=?""", (apk, entry_pk)).fetchone()
+        if not r:
+            die(f"entry {entry_pk} has no asset {apk} (see `show {entry_pk} --json` for ids)")
+        if r["ZASSETTYPE"] not in MEDIA_TYPES:
+            die(f"asset {apk} is type {r['ZASSETTYPE']!r}, not media; refusing to remove it")
+        au = u_str(r["ZID"])
+        conn.execute("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", (apk,))
+        conn.execute("delete from ZJOURNALENTRYASSETMO where Z_PK=?", (apk,))
+        gone_uuids.append(au)
+        if entry_uuid and au:
+            d = os.path.join(attach_dir(), entry_uuid, au)
+            if os.path.isdir(d): shutil.rmtree(d, ignore_errors=True)
+    if gone_uuids: ordering_drop(conn, entry_pk, gone_uuids)
+    return len(gone_uuids)
+
 def cmd_edit(a):
     body = a.body
     if a.body_file: body = open(a.body_file, errors="replace").read()
@@ -495,6 +518,7 @@ def cmd_edit(a):
     bookmark = True if a.bookmark else (False if a.no_bookmark else None)
     touches_text = body is not None or a.title is not None
     if not any([touches_text, media, has_loc, a.clear_location,
+                a.remove_media, a.remove_all_media,
                 a.date is not None, bookmark is not None]):
         die("nothing to change")
 
@@ -534,6 +558,15 @@ def cmd_edit(a):
                 conn.execute("delete from ZJOURNALENTRYASSETMO where Z_PK=?", (r["Z_PK"],))
             if gone: ordering_drop(conn, a.id, gone)
 
+        removed = 0
+        if a.remove_all_media:
+            pks = [r[0] for r in conn.execute(
+                """select Z_PK from ZJOURNALENTRYASSETMO
+                   where ZENTRY=? and ZASSETTYPE in ('photo','video','livePhoto')""", (a.id,))]
+            removed = remove_assets(conn, a.id, entry_uuid, pks)
+        elif a.remove_media:
+            removed = remove_assets(conn, a.id, entry_uuid, a.remove_media)
+
         added = []
         for m in media:
             ext = os.path.splitext(m)[1].lower()
@@ -564,6 +597,7 @@ def cmd_edit(a):
     if a.clear_location and not has_loc: bits.append("location cleared")
     if has_loc: bits.append("location set")
     if media: bits.append(f"{len(media)} media added")
+    if a.remove_media or a.remove_all_media: bits.append(f"{removed} media removed")
     print(f"Updated entry {a.id} ({', '.join(bits)}).")
 
 def cmd_delete(a):
@@ -669,6 +703,9 @@ def main():
     ed.add_argument("--bookmark", action="store_true")
     ed.add_argument("--no-bookmark", action="store_true")
     ed.add_argument("--add-media", nargs="+", metavar="PATH")
+    ed.add_argument("--remove-media", nargs="+", type=int, metavar="ASSET_ID",
+                    help="remove media assets by id (ids shown in `show <id>`)")
+    ed.add_argument("--remove-all-media", action="store_true")
     ed.add_argument("--lat", type=float); ed.add_argument("--lon", type=float)
     ed.add_argument("--place"); ed.add_argument("--city")
     ed.add_argument("--clear-location", action="store_true")

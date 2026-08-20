@@ -125,6 +125,31 @@ ok "photo survived clear" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYAS
 ok "ordering pruned" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING) from ZJOURNALENTRYMO where Z_PK=$EPK;")" "2"
 "$CLI" --db "$DB" edit $EPK >/dev/null 2>&1; ok "no-op edit rejected" "$?" "1"
 
+echo "T7a media removal"
+ROUT=$("$CLI" --db "$DB" write --body "Two pics." --media "$IMG" "$MOV" 2>&1)
+RPK=$(echo "$ROUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+RUUID=$("$CLI" --db "$DB" show $RPK --json | jq_ 'd["uuid"]')
+AID=$("$CLI" --db "$DB" show $RPK --json | jq_ '[a for a in d["assets"] if a["type"]=="photo"][0]["id"]')
+VID=$("$CLI" --db "$DB" show $RPK --json | jq_ '[a for a in d["assets"] if a["type"]=="video"][0]["id"]')
+"$CLI" --db "$DB" edit $RPK --remove-media $AID >/dev/null 2>&1
+ok "one asset removed" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$RPK;")" "1"
+ok "video kept" "$(sqlite3 "$DB" "select ZASSETTYPE from ZJOURNALENTRYASSETMO where ZENTRY=$RPK;")" "video"
+ok "file rows pruned" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETFILEATTACHMENTMO fa join ZJOURNALENTRYASSETMO a on a.Z_PK=fa.ZASSET where a.ZENTRY=$RPK;")" "1"
+ok "ordering pruned to one" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING) from ZJOURNALENTRYMO where Z_PK=$RPK;")" "2"
+ok "files on disk reduced" "$(find "$ATT/$RUUID" -type f 2>/dev/null | wc -l | tr -d ' ')" "1"
+"$CLI" --db "$DB" edit $RPK --remove-media 99999 >/dev/null 2>&1
+ok "unknown asset id rejected" "$?" "1"
+NONMEDIA=$(sqlite3 "$DB" "select Z_PK from ZJOURNALENTRYASSETMO where ZASSETTYPE not in ('photo','video','livePhoto') limit 1;")
+if [ -n "$NONMEDIA" ]; then
+  NMENTRY=$(sqlite3 "$DB" "select ZENTRY from ZJOURNALENTRYASSETMO where Z_PK=$NONMEDIA;")
+  "$CLI" --db "$DB" edit $NMENTRY --remove-media $NONMEDIA >/dev/null 2>&1
+  ok "non-media asset refused" "$?" "1"
+fi
+"$CLI" --db "$DB" edit $RPK --remove-all-media >/dev/null 2>&1
+ok "remove-all cleared assets" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$RPK;")" "0"
+ok "remove-all cleared files" "$([ -z "$(find "$ATT/$RUUID" -type f 2>/dev/null)" ] && echo yes || echo no)" "yes"
+"$CLI" --db "$DB" delete $RPK --hard >/dev/null 2>&1
+
 echo "T7b CRDT guard"
 CPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALENTRYMO where ZMERGEABLEATTRIBUTES is not null limit 1;")
 if [ -n "$CPK" ]; then
