@@ -35,14 +35,20 @@ Reads run against a temp snapshot of `db` + `-wal` + `-shm`, so the live store i
 never locked or modified. Safe to run while Journal is open.
 
 ```sh
-journal-cli list --limit 20
-journal-cli list --since 2025-01-01 --full
-journal-cli show 95
-journal-cli search anguilla
+journal-cli list                                      # newest first
+journal-cli list --limit 20 --full                    # --full prints bodies
+journal-cli list --since 2025-01-01 --until 2025-12-31
+journal-cli list --include-empty                      # photo-only entries too
+journal-cli show 95                                   # one entry + attachments
+journal-cli search anguilla --full
 journal-cli export --dir ~/journal-export             # one .md per entry
 journal-cli export --dir ~/journal-export --format json
 journal-cli stats
+journal-cli doctor                                    # check access
 ```
+
+Every read command takes `--json` for scripting. `list` and `search` also take
+`--limit N` and `--full`.
 
 `show` resolves attachment paths to real files under `Library/Attachments/`.
 
@@ -73,9 +79,24 @@ journal-cli write --live --title "Waikiki" --body "..." \
     --media ~/Pictures/surf.heic --lat 21.2793 --lon -157.8294 \
     --place Waikiki --date 2026-08-01 --bookmark
 
+journal-cli write --live --title "Notes" --body-file notes.txt
+
 journal-cli delete 103 --live          # soft delete (Recently Deleted)
 journal-cli delete 103 --live --hard   # remove row, assets, and files
 ```
+
+To rehearse anything without risk, work against a throwaway copy:
+
+```sh
+DB=$(journal-cli sandbox --dir /tmp/jtest)            # seed from the live store
+DB=$(journal-cli sandbox --dir /tmp/jtest --from ~/Backups/journal-cli/<ts>/moments.sqlite)
+journal-cli --db "$DB" write --body "no --live needed here"
+journal-cli --db "$DB" list --limit 3
+```
+
+`--db` (or `$JOURNAL_DB`) points any command at another store. Anything that is
+not the real Journal store skips the `--live` guard, and attachments are read
+and written beside that database rather than in your real `Attachments/`.
 
 ### How writes are constructed
 
@@ -83,7 +104,7 @@ journal-cli delete 103 --live --hard   # remove row, assets, and files
 |---|---|
 | body / title | RTF blob in `ZTEXT` / `ZTITLE` via `textutil` |
 | date | `ZENTRYDATE` + `ZMOMENTDATEFORSORTING`, Core Data epoch |
-| bookmark | `ZFLAGGED` |
+| bookmark | `ZFLAGGED` (verified: Journal shows the Bookmarked badge) |
 | photo / video | `ZJOURNALENTRYASSETMO` type `photo`/`video`, source `imagePicker`, plus a `ZJOURNALENTRYASSETFILEATTACHMENTMO` row |
 | location | `ZJOURNALENTRYASSETMO` type `multiPinMap`, source `locationPicker`, `ZISSLIM=1` |
 | asset order | `ZASSETORDERING`, plain JSON `[assetUUID, index, ...]` |
@@ -125,17 +146,61 @@ macOS 26.6.2 against a real library:
 So Journal's sync engine fully adopts rows and files it did not create,
 provided the Core Data bookkeeping is right.
 
-### Known limits
+### Not supported
+
+Journal stores twelve asset types. This tool writes three:
+
+| Asset type | Count in a real library | Support |
+|---|---|---|
+| `photo` | 267 | read + write |
+| `streakEvent` | 208 | read metadata only |
+| `livePhoto` | 89 | read metadata only |
+| `multiPinMap` (location) | 85 | read + write |
+| `video` | 31 | read + write |
+| `stateOfMind` | 6 | read metadata only |
+| `workoutRoute` | 3 | read metadata only |
+| `workoutIcon` | 3 | read metadata only |
+| `motionActivity` | 1 | read metadata only |
+| `link` | 1 | read metadata only |
+| `genericMap` | 1 | read only |
+| `drawing` | 1 | read metadata only |
+
+"read metadata only" means `show`/`export` report the asset's type and any
+attached files, but do not decode its type-specific payload and cannot create one.
+
+Beyond assets:
+
+- **No editing.** There is no `edit` command. You cannot change an existing
+  entry's text, title, date or bookmark, and you cannot add media or a location
+  to an entry that already exists. Write a new entry, or edit in the app.
+- **No `ZMERGEABLEATTRIBUTES`.** Journal keeps a second copy of the entry text
+  in a CRDT blob (magic `crdt`, a protobuf) used for merge-safe multi-device
+  editing. Written entries have `ZTEXT` only. Journal renders and syncs them
+  fine, but concurrent edits on two devices may not merge the way a
+  natively-created entry would.
+- **No multiple journals.** Journal supports several journals; new entries go to
+  the first one in `ZJOURNALMO`.
+- **No Recently Deleted management.** `delete` without `--hard` moves an entry
+  there, but there is no restore or empty command.
+- **No audio.** Journal can record audio entries; this cannot.
+- **No reflection prompts.** `ZPROMPT` / `ZREFLECTIONPROMPT` are read-only
+  curiosities here.
+- **Search is a client-side substring match** over title and body. It is not
+  Journal's own index, does not rank, and does not search asset metadata.
+
+### Known limits on what is supported
 
 - Photos are copied as-is. Journal's own `_resized` files are downscaled
   derivatives; no resizing is performed here.
 - No Photos-library linkage. Real photo assets carry an `assetIdentifier`
-  pointing into the Photos database; written ones do not.
+  pointing into the Photos database; written ones do not, so a written photo
+  will not deep-link back to Photos.
 - Deleting a synced row is only partly verified. Locally it is clean and the
   entry does not come back after a resync, but whether the CloudKit record is
   tombstoned or merely orphaned was not confirmed, and other devices were not
   checked. Prefer deleting through Journal.app when in doubt.
-- Live writes need Full Disk Access, which macOS can revoke; see below.
+- Live writes need Full Disk Access, which macOS can revoke mid-session; see
+  Troubleshooting.
 
 ## Tests
 
