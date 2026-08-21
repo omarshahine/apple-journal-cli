@@ -5,7 +5,6 @@ Subcommands:
   journals                       list Day One journals and entry counts
   plan     <journal>             what would be imported, and what can't be
   import   <journal>             write the entries via journal-cli
-  fix-locations <journal>        correct imported locations from photo EXIF
   fix-export <journal> <dir>     repair a Day One markdown export in place
 
 Why this exists: Day One's markdown export silently renders every timestamp
@@ -14,7 +13,7 @@ hours -- sometimes a whole day -- off. Day One's SQLite store still has the
 original zone per entry, so this reads that directly and uses the export
 folder only as a source of image bytes.
 """
-import os, re, sys, json, shutil, argparse, subprocess, datetime
+import os, re, sys, json, shutil, sqlite3, argparse, collections, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dayone, exifgps, photoslib
@@ -123,6 +122,13 @@ def cmd_import(args):
     if args.limit:
         todo = todo[:args.limit]
 
+    # Probe once rather than discovering mid-migration: an older journal-cli
+    # rejects --markdown for every text entry while media-only entries still
+    # land, leaving a half-written journal and state file.
+    if _render(args.cli, "probe") is None:
+        die("%s does not support --markdown (needs journal-cli 1.1.0+)"
+            % args.cli)
+
     live = not args.target_db
     print("Day One '%s' -> Apple Journal '%s'" % (j["name"], target))
     print("%d to write, %d already done, %d empty/skipped%s"
@@ -141,10 +147,15 @@ def cmd_import(args):
         cmd += ["write", "--journal", target]
         when = e["utc"] if args.time_mode == "utc" else e["local"]
         cmd += ["--date", when]
+        # Hand over the raw markdown: journal-cli --markdown renders it into
+        # Journal's rich text, so headings and emphasis become real formatting
+        # instead of literal "###### " in the finished entry.
         if e["title"]:
-            cmd += ["--title", e["title"]]
+            cmd += ["--title", e.get("title_md") or e["title"]]
         if e["body"]:
-            cmd += ["--body", e["body"]]
+            cmd += ["--body", e.get("body_md") or e["body"]]
+        if e["title"] or e["body"]:
+            cmd += ["--markdown"]
         if e["starred"]:
             cmd += ["--bookmark"]
         if e["lat"] is not None and e["lon"] is not None:
@@ -198,6 +209,9 @@ def cmd_import(args):
 # journal-cli snapshots the whole store before every live write; across a
 # few thousand entries that is tens of GB of near-identical copies. Keep the
 # ones that predate this run, retire the rest to the Trash (never rm).
+_PRUNE_WARNED = False
+
+
 def _backup_dirs():
     root = os.path.expanduser("~/Backups/journal-cli")
     if not os.path.isdir(root):
@@ -210,11 +224,19 @@ def _prune_backups(keep):
     stale = made[:-1]                       # always keep the most recent
     if not stale:
         return
-    if shutil.which("trash"):
-        subprocess.run(["trash"] + stale, capture_output=True)
-    else:
-        for d in stale:
-            shutil.rmtree(d, ignore_errors=True)
+    if not shutil.which("trash"):
+        # These are the only copies of the store from before each write.
+        # Retiring them to the Trash is recoverable; deleting them is not, so
+        # rather than quietly destroying backups, leave them and say so.
+        global _PRUNE_WARNED
+        if not _PRUNE_WARNED:
+            _PRUNE_WARNED = True
+            sys.stderr.write(
+                "warning: `trash` is unavailable (macOS 26+), so backup "
+                "snapshots are being kept rather than deleted. Remove "
+                "~/Backups/journal-cli yourself if disk space runs short.\n")
+        return
+    subprocess.run(["trash"] + stale, capture_output=True)
 
 
 def _haversine(a, b, c, d):
@@ -271,7 +293,7 @@ def cmd_fix_locations(args):
     fixes, skipped_unverified = [], []
     for e in entries:
         pk = state["done"].get(e["uuid"])
-        if not isinstance(pk, int):
+        if type(pk) is not int:
             continue
         got = _photo_fix(e)
         if not got:
@@ -333,7 +355,9 @@ def cmd_fix_locations(args):
         return
 
     ok = 0
-    for e, pk, got, off, place, city in fixes:
+    prune = bool(args.prune_backups) and not args.target_db
+    backups_before = set(_backup_dirs()) if prune else set()
+    for n, (e, pk, got, off, place, city) in enumerate(fixes, 1):
         cmd = [args.cli]
         if args.target_db:
             cmd += ["--db", args.target_db]
@@ -351,7 +375,220 @@ def cmd_fix_locations(args):
                              % (pk, (r.stderr or r.stdout).strip().split("\n")[-1]))
         else:
             ok += 1
+        if prune and n % 25 == 0:
+            _prune_backups(backups_before)
+    if prune:
+        _prune_backups(backups_before)
     print("\nRelocated %d of %d." % (ok, len(fixes)))
+
+
+def _stored(cli, target_db):
+    """pk -> (title, plain text, raw RTF) for entries currently in the store.
+
+    The RTF matters: an entry can read correctly as plain text while still
+    having lost the bold and list markup its source called for.
+    """
+    cmd = [cli]
+    if target_db:
+        cmd += ["--db", target_db]
+    cmd += ["list", "--limit", "100000", "--full", "--include-empty", "--json"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        die("could not list entries: %s" % r.stderr.strip())
+    text = {e["id"]: (e.get("title") or "", e.get("text") or "")
+            for e in json.loads(r.stdout)}
+
+    # Must be the same store the `list` subprocess just read, or primary keys
+    # would be matched against a different database entirely.
+    db = target_db or os.environ.get("JOURNAL_DB") or os.path.expanduser(
+        "~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite")
+    rtf, crdt, rtf_ok = {}, set(), True
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        for pk, blob, merge in con.execute(
+                "select Z_PK, ZTEXT, ZMERGEABLEATTRIBUTES from ZJOURNALENTRYMO"):
+            if blob is not None:
+                rtf[pk] = (bytes(blob) if isinstance(blob, (bytes, bytearray))
+                           else str(blob).encode("utf-8"))
+            if merge is not None:
+                crdt.add(pk)
+        con.close()
+    except sqlite3.Error:
+        # Without the RTF we cannot tell rendered from unrendered formatting.
+        # Say so and check only what plain text can prove, rather than
+        # treating every entry as having lost its markup.
+        rtf_ok = False
+        sys.stderr.write("note: could not read entry RTF from %s; checking "
+                         "visible text only.\n" % db)
+    return ({pk: (t[0], t[1], rtf.get(pk)) for pk, t in text.items()},
+            rtf_ok, crdt)
+
+
+# Formatting controls that carry meaning, counted so two RTF documents can be
+# compared without tripping over serializer differences -- a macOS upgrade can
+# change the \cocoartf version or font-table order without changing a word.
+_FMT_CONTROLS = (
+    ("bold", re.compile(rb"\\b(?![0-9a-zA-Z])")),
+    ("italic", re.compile(rb"\\i(?![0-9a-zA-Z])")),
+    ("strike", re.compile(rb"\\strike(?![0-9a-zA-Z])")),
+    ("list", re.compile(rb"\\listtext")),
+)
+
+
+def _fmt_signature(rtf):
+    if rtf is None:
+        return None
+    return tuple(len(pat.findall(rtf)) for _name, pat in _FMT_CONTROLS)
+
+
+def _render(cli, md, plain=False, inline=False):
+    """What journal-cli --markdown would store for this source, or None.
+
+    `inline` matches how a title is rendered: no block handling, so a title
+    of "1. first" stays a title rather than becoming a list item.
+    """
+    cmd = [cli, "render"]
+    if inline:
+        cmd.append("--inline")
+    elif plain:
+        cmd.append("--plain")
+    r = subprocess.run(cmd, input=(md or "").encode("utf-8"),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return None if r.returncode else r.stdout
+
+
+def cmd_fix_text(args):
+    """Re-render entries whose text still carries raw Markdown syntax.
+
+    Early imports wrote Day One's markdown through as plain text, so headings
+    and escapes ended up visible. This rewrites those entries from the
+    original markdown using journal-cli --markdown.
+    """
+    j, entries = gather(args)
+    state_path = args.state or os.path.join(
+        STATE_DIR, re.sub(r"\W+", "_", j["name"]) + ".json")
+    state = load_state(state_path)
+    if not state["done"]:
+        die("no import state at %s -- run `import` first" % state_path)
+
+    stored, rtf_ok, crdt = _stored(args.cli, args.target_db)
+    if _render(args.cli, "probe") is None:
+        die("%s has no `render` command -- upgrade journal-cli" % args.cli)
+
+    # Compare each entry against what the renderer would produce now, rather
+    # than sniffing the stored text for leftover syntax. Sniffing cannot tell
+    # a correctly rendered "**literal**" (from escaped source) or a fenced
+    # "# comment" from unrendered markup, so it kept flagging good entries
+    # forever. An exact comparison is idempotent by construction.
+    todo, reasons, edited = [], collections.Counter(), []
+    for e in entries:
+        pk = state["done"].get(e["uuid"])
+        # `True` is an int in Python and equal to 1, so a state record that
+        # fell back to a boolean would otherwise target entry 1.
+        if type(pk) is not int or pk not in stored:
+            continue
+        title, text, rtf = stored[pk]
+        # An entry edited in Journal since import carries Journal's own CRDT
+        # copy of the text. journal-cli refuses to rewrite those without
+        # --force, and forcing would discard the user's edit -- so leave them
+        # alone and say which ones rather than failing partway through.
+        if pk in crdt:
+            edited.append((e, pk))
+            continue
+        why = None
+
+        want_title = _render(args.cli, e.get("title_md") or e["title"] or "",
+                             inline=True)
+        if want_title is not None and want_title.decode("utf-8", "replace") != title:
+            why = "title differs from rendered source"
+
+        body_md = e.get("body_md")
+        if body_md is None:
+            body_md = e["body"] or ""
+        if why is None:
+            want_plain = _render(args.cli, body_md, plain=True)
+            want_text = ("" if want_plain is None
+                         else want_plain.decode("utf-8", "replace"))
+            if want_plain is not None and want_text != text:
+                why = "body text differs from rendered source"
+            elif rtf_ok and want_plain is not None:
+                if not want_text.strip():
+                    if rtf is not None:
+                        why = "body should be empty"
+                elif _fmt_signature(rtf) != _fmt_signature(
+                        _render(args.cli, body_md)):
+                    why = "body formatting differs from rendered source"
+
+        if why:
+            reasons[why] += 1
+            todo.append((e, pk))
+
+    if edited:
+        print("Skipped %d entr%s edited in Journal since import (they carry "
+              "Journal's own copy of the text; re-rendering would discard "
+              "your edit):" % (len(edited), "y" if len(edited) == 1 else "ies"))
+        for e, pk in edited[:5]:
+            print("   [%s] %s" % (pk, (e["title"] or "(untitled)")[:52]))
+        if len(edited) > 5:
+            print("   ... and %d more" % (len(edited) - 5))
+        print()
+
+    print("%d of %d imported entries need re-rendering."
+          % (len(todo), len(state["done"])))
+    for why, n in reasons.most_common():
+        print("   %4d  %s" % (n, why))
+    if not todo:
+        return
+    for e, pk in todo[:5]:
+        before = stored[pk][1].split("\n")[0][:64]
+        print("   [%s] %s" % (pk, before or stored[pk][0][:64]))
+    if len(todo) > 5:
+        print("   ... and %d more" % (len(todo) - 5))
+    if args.dry_run:
+        print("\nDRY RUN: nothing written.")
+        return
+
+    ok = fail = 0
+    # Gate on the option, not on whether the keep set happens to be non-empty:
+    # a first run against an empty ~/Backups would otherwise skip pruning.
+    prune = bool(args.prune_backups) and not args.target_db
+    backups_before = set(_backup_dirs()) if prune else set()
+    for n, (e, pk) in enumerate(todo, 1):
+        cmd = [args.cli]
+        if args.target_db:
+            cmd += ["--db", args.target_db]
+        cmd += ["edit", str(pk), "--markdown"]
+        title_md = e.get("title_md") or e["title"]
+        # Drive off the raw markdown, not the rendered text: a body that is
+        # only a "---" rule renders to nothing and must be cleared, which a
+        # truthiness check on the rendered text would skip.
+        body_md = e.get("body_md")
+        if body_md is None:
+            body_md = e["body"]
+        if title_md:
+            cmd += ["--title", title_md]
+        if body_md is not None and (body_md != "" or e["body"] == ""):
+            cmd += ["--body", body_md]
+        if not title_md and not body_md:
+            continue
+        if not args.target_db:
+            cmd += ["--live", "--accept-risk"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            fail += 1
+            sys.stderr.write("  entry %s FAILED: %s\n"
+                             % (pk, (r.stderr or r.stdout).strip().split("\n")[-1]))
+            if fail >= args.max_failures:
+                die("stopping after %d failures" % fail)
+        else:
+            ok += 1
+        if n % 100 == 0:
+            print("   %d/%d" % (n, len(todo)))
+        if prune and n % 25 == 0:
+            _prune_backups(backups_before)
+    if prune:
+        _prune_backups(backups_before)
+    print("\nRewrote %d, failed %d." % (ok, fail))
 
 
 # ------------------------------------------------------------- fix-export
@@ -584,8 +821,23 @@ def main():
     s.add_argument("--trust-exif", action="store_true",
                    help="override existing locations even when the Photos "
                         "library has no matching asset to corroborate them")
+    s.add_argument("--prune-backups", action="store_true",
+                   help="trash the per-write store snapshots as they pile up")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_fix_locations)
+
+    s = sub.add_parser("fix-text",
+                       help="re-render imported entries that still show raw Markdown")
+    s.add_argument("journal")
+    s.add_argument("--export", help="markdown export dir (extra media source)")
+    s.add_argument("--target-db", help="operate on a sandbox store instead")
+    s.add_argument("--cli", default="journal-cli")
+    s.add_argument("--state", help="import state file to map entries by")
+    s.add_argument("--max-failures", type=int, default=5)
+    s.add_argument("--prune-backups", action="store_true",
+                   help="trash the per-write store snapshots as they pile up")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_fix_text)
 
     s = sub.add_parser("fix-export",
                        help="repair timestamps in a Day One markdown export")

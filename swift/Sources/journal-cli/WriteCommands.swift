@@ -1,6 +1,26 @@
 // WriteCommands.swift — write, edit, delete, restore, empty, sandbox.
 import Foundation
 
+// Journal stores entry text as RTF and renders its formatting, so callers
+// that already have styled text can hand it over verbatim instead of having
+// it flattened through textToRTF.
+private func readBodyRTF(_ a: Args) -> (data: Data, plain: String)? {
+    // Markdown is rendered into Journal's own rich text; Journal shows no
+    // Markdown syntax, so leaving it in place would print it literally.
+    if a.has("--markdown"), let md = readBody(a) { return markdownToRTF(md) }
+    guard let path = a.value("--body-rtf") else { return nil }
+    let full = (path as NSString).expandingTildeInPath
+    guard let d = FileManager.default.contents(atPath: full) else {
+        die("cannot read --body-rtf file: \(path)")
+    }
+    guard NSAttributedString(rtf: d, documentAttributes: nil) != nil else {
+        die("--body-rtf is not valid RTF: \(path)")
+    }
+    // rtfToText is what every read path uses, so ZTEXTLENGTH and the
+    // emptiness check describe what `show` will actually return.
+    return (d, rtfToText(d))
+}
+
 private func readBody(_ a: Args) -> String? {
     if let b = a.value("--body") { return b }
     if let f = a.value("--body-file") {
@@ -20,8 +40,23 @@ private func readBody(_ a: Args) -> String? {
     return nil
 }
 
+// Render Markdown the way `write --markdown` would, without touching a store.
+// Lets callers compare an entry's stored text against what it *should* be,
+// which is exact where sniffing for leftover syntax is guesswork.
+func cmdRender(_ a: Args) {
+    let md = readBody(a) ?? ""
+    if a.has("--inline") {
+        FileHandle.standardOutput.write(Data(markdownToInlinePlain(md).utf8))
+    } else if a.has("--plain") {
+        FileHandle.standardOutput.write(Data(markdownToPlain(md).utf8))
+    } else {
+        FileHandle.standardOutput.write(markdownToRTF(md).data)
+    }
+}
+
 func cmdWrite(_ a: Args) {
-    let body = readBody(a) ?? ""
+    let rtfBody = readBodyRTF(a)
+    let body = rtfBody?.plain ?? (readBody(a) ?? "")
     let media = a.values("--media").map { (($0 as NSString).expandingTildeInPath as NSString).standardizingPath }
     for m in media where !FileManager.default.fileExists(atPath: m) {
         die("media file not found: \(m)")
@@ -44,17 +79,19 @@ func cmdWrite(_ a: Args) {
     if hasLoc && (lat == nil || lon == nil) { die("--lat and --lon must be given together") }
     let link = a.value("--link")
     let hasText = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    if !hasText && media.isEmpty && lp == nil && !hasLoc && link == nil {
-        die("nothing to write (need --body/--body-file/stdin, --media, --live-photo, --link, or --lat/--lon)")
+    let title = a.value("--title").map { a.has("--markdown") ? markdownToInlinePlain($0) : $0 }
+    let hasTitle = !(title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    if !hasText && !hasTitle && media.isEmpty && lp == nil && !hasLoc && link == nil {
+        die("nothing to write (need --title, --body/--body-file/stdin, --media, --live-photo, --link, or --lat/--lon)")
     }
 
     let when = a.value("--date").map(parseDate) ?? Date()
     let ts = cd(when)
     let entryUUID = uid()
-    let title = a.value("--title")
 
     if a.has("--dry-run") {
         var bits: [String] = []
+        if hasTitle { bits.append("title") }
         if hasText { bits.append("\(body.count) chars") }
         if !media.isEmpty { bits.append("\(media.count) media") }
         if lp != nil { bits.append("1 live photo") }
@@ -77,7 +114,7 @@ func cmdWrite(_ a: Args) {
                ZMINIMUMSUPPORTEDAPPVERSION, ZMINIMUMSUPPORTEDAPPVERSIONMODE)
             values (?,?,1,'blankEntry',?, ?,?,?,?, ?,?,?,?, 0,?,0,0, 0,0,0, 0,0)
             """, [pk, ent, uidBytes(entryUUID), ts, cdNow(), cdNow(), ts,
-                  hasText ? textToRTF(body) : nil,
+                  hasText ? (rtfBody?.data ?? textToRTF(body)) : nil,
                   title.map(textToRTF),
                   body.count, title != nil ? 1 : 0,
                   a.has("--bookmark") ? 1 : 0])
@@ -145,12 +182,14 @@ func cmdWrite(_ a: Args) {
             if !j.isDefault {
                 db.exec("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
                         [pk, j.pk])
+                markJournalsUnsynced(db, [j.pk])
             }
         }
         return pk
     }
 
     var bits: [String] = []
+    if hasTitle { bits.append("title") }
     if hasText { bits.append("\(body.count) chars") }
     if !media.isEmpty { bits.append("\(media.count) media") }
     if lp != nil { bits.append("1 live photo") }
@@ -166,9 +205,10 @@ func cmdWrite(_ a: Args) {
 }
 
 func cmdEdit(_ a: Args) {
+    let rtfBody = readBodyRTF(a)
     guard let idStr = a.positional.first, let pk = Int64(idStr) else { die("edit needs an entry id") }
-    let body = readBody(a)
-    let title = a.value("--title")
+    let body = rtfBody?.plain ?? readBody(a)
+    let title = a.value("--title").map { a.has("--markdown") ? markdownToInlinePlain($0) : $0 }
     let media = a.values("--add-media").map { (($0 as NSString).expandingTildeInPath as NSString).standardizingPath }
     for m in media where !FileManager.default.fileExists(atPath: m) {
         die("media file not found: \(m)")
@@ -211,9 +251,9 @@ func cmdEdit(_ a: Args) {
         var sets: [String] = []
         var vals: [Any?] = []
         if let b = body {
+            let blank = b.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             sets += ["ZTEXT=?", "ZTEXTLENGTH=?"]
-            vals += [b.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : textToRTF(b),
-                     b.count]
+            vals += [blank ? nil : (rtfBody?.data ?? textToRTF(b)), b.count]
         }
         if let t = title {
             let empty = t.trimmingCharacters(in: .whitespaces).isEmpty
@@ -298,10 +338,12 @@ func cmdEdit(_ a: Args) {
 
         if let jsel = a.value("--journal") {
             let j = resolveJournal(db, jsel)
+            let oldJournalPKs = journalPKsForEntry(db, pk)
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             if !j.isDefault {
                 db.exec("insert into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)", [pk, j.pk])
             }
+            markJournalsUnsynced(db, oldJournalPKs + (j.isDefault ? [] : [j.pk]))
         }
     }
 
@@ -339,6 +381,7 @@ func cmdDelete(_ a: Args) {
                 + "  Journal.app, or pass --force if you accept the resurrection risk.")
         }
         if a.has("--hard") {
+            let oldJournalPKs = journalPKsForEntry(db, pk)
             let apks = db.query("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
                 .compactMap { $0.i("Z_PK") }
             for apk in apks {
@@ -347,6 +390,7 @@ func cmdDelete(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
+            markJournalsUnsynced(db, oldJournalPKs)
             if let eu = uString(row.b("ZID")) {
                 try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
             }
@@ -403,6 +447,7 @@ func cmdEmpty(_ a: Args) {
             """) {
             if r.flag("ZISUPLOADEDTOCLOUD") && !a.has("--force") { skipped += 1; continue }
             let pk = r.i("Z_PK") ?? 0
+            let oldJournalPKs = journalPKsForEntry(db, pk)
             for apk in db.query("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
                 .compactMap({ $0.i("Z_PK") }) {
                 db.exec("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", [apk])
@@ -410,6 +455,7 @@ func cmdEmpty(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
+            markJournalsUnsynced(db, oldJournalPKs)
             if let eu = uString(r.b("ZID")) {
                 try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
             }
@@ -423,6 +469,36 @@ func cmdEmpty(_ a: Args) {
             + " Empty Recently Deleted in Journal.app instead (or --force to purge anyway)."
     }
     print(msg)
+}
+
+func cmdSyncJournals(_ a: Args) {
+    let selected = a.value("--journal")
+    if a.has("--dry-run") {
+        let rows: [JournalRow] = withSnapshot { db in
+            if let selected {
+                let journal = resolveJournal(db, selected)
+                if journal.isDefault { die("the default journal has no custom membership record to sync") }
+                return [journal]
+            }
+            return journalRows(db).filter { !$0.isDefault }
+        }
+        print("DRY RUN: would queue \(rows.count) custom journal\(rows.count == 1 ? "" : "s") for membership re-upload. Nothing written.")
+        return
+    }
+
+    let count: Int = withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
+        let rows: [JournalRow]
+        if let selected {
+            let journal = resolveJournal(db, selected)
+            if journal.isDefault { die("the default journal has no custom membership record to sync") }
+            rows = [journal]
+        } else {
+            rows = journalRows(db).filter { !$0.isDefault }
+        }
+        markJournalsUnsynced(db, rows.map(\.pk))
+        return rows.count
+    }
+    print("Queued \(count) custom journal\(count == 1 ? "" : "s") for membership re-upload. Open Journal.app to sync the corrected memberships to other devices.")
 }
 
 func cmdSandbox(_ a: Args) {

@@ -585,6 +585,19 @@ def resolve_journal(conn, sel):
     die(f"journal name {sel!r} is ambiguous; use the id: " +
         ", ".join(str(j["pk"]) for j in hits))
 
+def journal_pks_for_entry(conn, entry_pk):
+    return [r[0] for r in conn.execute(
+        "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=?", (entry_pk,))]
+
+def mark_journals_unsynced(conn, journal_pks):
+    """Queue changed custom-journal membership records for CloudKit upload."""
+    for pk in set(journal_pks):
+        conn.execute("""update ZJOURNALMO
+                        set ZISUPLOADEDTOCLOUD=0, Z_OPT=coalesce(Z_OPT,0)+1
+                        where Z_PK=?
+                          and not (ZMERGEABLEATTRIBUTES is null and ZSORTCATEGORY < 0)""",
+                     (pk,))
+
 def cmd_journals(a):
     with Snapshot() as c:
         rows = journal_rows(c)
@@ -763,6 +776,7 @@ def cmd_write(a):
             if not jdefault:
                 conn.execute("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
                              (pk, jpk))
+                mark_journals_unsynced(conn, [jpk])
         # no --journal: the entry lands in the default journal implicitly (no join
         # row), matching how most native entries are stored
 
@@ -929,10 +943,12 @@ def cmd_edit(a):
 
         if a.journal:
             jpk, jname, jdefault = resolve_journal(conn, a.journal)
+            old_jpks = journal_pks_for_entry(conn, a.id)
             conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (a.id,))
             if not jdefault:
                 conn.execute("insert into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
                              (a.id, jpk))
+            mark_journals_unsynced(conn, old_jpks + ([] if jdefault else [jpk]))
 
     bits = []
     if body is not None: bits.append("body")
@@ -964,6 +980,7 @@ def cmd_delete(a):
                 "  sync (verified). Use a soft delete (no --hard), delete it in\n"
                 "  Journal.app, or pass --force if you accept the resurrection risk.")
         if a.hard:
+            old_jpks = journal_pks_for_entry(conn, a.id)
             apks = [r[0] for r in conn.execute(
                 "select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", (a.id,))]
             for apk in apks:
@@ -971,6 +988,7 @@ def cmd_delete(a):
             conn.execute("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", (a.id,))
             conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (a.id,))
             conn.execute("delete from ZJOURNALENTRYMO where Z_PK=?", (a.id,))
+            mark_journals_unsynced(conn, old_jpks)
             eu = u_str(row["ZID"])
             if eu:
                 d = os.path.join(attach_dir(), eu)
@@ -1045,12 +1063,14 @@ def cmd_empty(a):
             if r["ZISUPLOADEDTOCLOUD"] and not a.force:
                 skipped += 1; continue
             eu = u_str(r["ZID"])
+            old_jpks = journal_pks_for_entry(conn, r["Z_PK"])
             for (apk,) in conn.execute("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?",
                                        (r["Z_PK"],)):
                 conn.execute("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", (apk,))
             conn.execute("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", (r["Z_PK"],))
             conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (r["Z_PK"],))
             conn.execute("delete from ZJOURNALENTRYMO where Z_PK=?", (r["Z_PK"],))
+            mark_journals_unsynced(conn, old_jpks)
             if eu:
                 d = os.path.join(attach_dir(), eu)
                 if os.path.isdir(d): shutil.rmtree(d, ignore_errors=True)
@@ -1061,6 +1081,29 @@ def cmd_empty(a):
                 " a local purge of synced entries resurrects them from iCloud."
                 " Empty Recently Deleted in Journal.app instead (or --force to purge anyway).")
     print(msg)
+
+def cmd_sync_journals(a):
+    def selected_rows(conn):
+        if a.journal:
+            pk, name, is_default = resolve_journal(conn, a.journal)
+            if is_default:
+                die("the default journal has no custom membership record to sync")
+            return [{"pk": pk, "name": name, "default": False}]
+        return [j for j in journal_rows(conn) if not j["default"]]
+
+    if a.dry_run:
+        with Snapshot() as conn:
+            rows = selected_rows(conn)
+        print(f"DRY RUN: would queue {len(rows)} custom journal"
+              f"{'s' if len(rows) != 1 else ''} for membership re-upload. Nothing written.")
+        return
+
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
+        rows = selected_rows(conn)
+        mark_journals_unsynced(conn, [j["pk"] for j in rows])
+    print(f"Queued {len(rows)} custom journal{'s' if len(rows) != 1 else ''} "
+          "for membership re-upload. Open Journal.app to sync the corrected "
+          "memberships to other devices.")
 
 def cmd_sandbox(a):
     """Seed a throwaway store. --from lets tests run off a backup without FDA."""
@@ -1189,6 +1232,14 @@ def main():
     em.add_argument("--dry-run", dest="dry_run", action="store_true")
     em.add_argument("--accept-risk", dest="accept_risk", action="store_true")
     em.add_argument("--live", action="store_true"); em.set_defaults(func=cmd_empty)
+
+    sj = sub.add_parser("sync-journals",
+                        help="re-upload custom-journal memberships after a direct-store import")
+    sj.add_argument("--journal", help="journal name or id (default: all custom journals)")
+    sj.add_argument("--dry-run", dest="dry_run", action="store_true")
+    sj.add_argument("--accept-risk", dest="accept_risk", action="store_true")
+    sj.add_argument("--live", action="store_true")
+    sj.set_defaults(func=cmd_sync_journals)
 
     d = sub.add_parser("delete"); d.add_argument("id", type=int)
     d.add_argument("--hard", action="store_true")

@@ -96,6 +96,49 @@ def timezone_name(blob):
     return m.group(1).decode("utf-8", "replace") if m else None
 
 
+# Day One writes markdown; Apple Journal stores plain text and renders none
+# of it, so any syntax left in place shows up literally as "###### " and
+# "\\." in the finished entry.
+_ESCAPED = re.compile(r"\\([\\`*_{}\[\]()#+\-.!>~|])")
+_HEADING = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
+_RULE = re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$")
+_BOLD_ITALIC = re.compile(r"(\*{1,3}|_{1,3})(\S(?:.*?\S)?)\1", re.S)
+_LINK = re.compile(r'\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+_CODE_FENCE = re.compile(r"(?m)^[ \t]*```[^\n]*$")
+
+
+def markdown_to_inline_text(md):
+    """Flatten a single-line field such as a title.
+
+    Block rules must not apply: a first line of "---" is a title, not a
+    horizontal rule, and "1. first" is a title, not a list item. Mirrors
+    journal-cli's `render --inline`.
+    """
+    if not md:
+        return md
+    out = _LINK.sub(lambda m: m.group(2) if m.group(1).strip() in ("", m.group(2))
+                    else "%s (%s)" % (m.group(1), m.group(2)), md)
+    out = _BOLD_ITALIC.sub(lambda m: m.group(2), out)
+    out = _ESCAPED.sub(r"\1", out)
+    return out.strip()
+
+
+def markdown_to_text(md):
+    """Flatten Day One markdown into what a plain-text reader should see."""
+    if not md:
+        return md
+    out = _CODE_FENCE.sub("", md)
+    out = _RULE.sub("", out)
+    out = _HEADING.sub("", out)
+    # a link becomes "text (url)", or just the url when the text repeats it
+    out = _LINK.sub(lambda m: m.group(2) if m.group(1).strip() in ("", m.group(2))
+                    else "%s (%s)" % (m.group(1), m.group(2)), out)
+    out = _BOLD_ITALIC.sub(lambda m: m.group(2), out)
+    out = _ESCAPED.sub(r"\1", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def _local(utc, tz):
     if tz and zoneinfo:
         try:
@@ -185,6 +228,12 @@ def read_entries(con, journal_pk, media=None):
                 body = "\n".join(lines[1:]).strip()
             else:
                 title, body = first, "\n".join(lines[1:]).strip()
+        # Keep the raw markdown too: journal-cli --markdown renders it into
+        # Journal's rich text, so headings survive as real bold rather than
+        # being flattened here.
+        title_md, body_md = title, body
+        title = markdown_to_inline_text(title) or None
+        body = markdown_to_text(body)
 
         tz = timezone_name(e["ZTIMEZONE"])
         utc = datetime.datetime.fromtimestamp(
@@ -203,6 +252,8 @@ def read_entries(con, journal_pk, media=None):
             "starred": bool(e["ZSTARRED"]),
             "title": title,
             "body": body,
+            "title_md": title_md,
+            "body_md": body_md,
             "media": files,
             "audio": audio,
             "missing": missing,

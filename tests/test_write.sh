@@ -235,16 +235,29 @@ if [ "$NJ" -ge 2 ]; then
   JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "Test Journal" 2>&1)
   JPK=$(echo "$JOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "join row written" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$JPK;")" "$TJPK"
+  ok "custom journal queued for sync" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  ok "custom journal version bumped" "$(sqlite3 "$DB" "select Z_OPT from ZJOURNALMO where Z_PK=$TJPK;")" "2"
   DOUT=$("$CLI" --db "$DB" write --body "In the default journal." 2>&1)
   DPK=$(echo "$DOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "default write has no join row" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
   "$CLI" --db "$DB" edit $DPK --journal "Test Journal" >/dev/null 2>&1
   ok "edit moves into journal" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "$TJPK"
+  ok "move queues destination journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
   "$CLI" --db "$DB" edit $DPK --journal 1 >/dev/null 2>&1
   ok "edit moves back to default (join row dropped)" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  ok "move queues source journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
+  "$CLI" --db "$DB" sync-journals --dry-run >/dev/null 2>&1
+  ok "sync-journals dry-run is read-only" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
+  "$CLI" --db "$DB" sync-journals >/dev/null 2>&1
+  ok "sync-journals repairs existing memberships" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
   "$CLI" --db "$DB" write --body x --journal "No Such Journal" >/dev/null 2>&1
   ok "unknown journal rejected" "$?" "1"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
   "$CLI" --db "$DB" delete $JPK --hard >/dev/null 2>&1
+  ok "hard delete queues former journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
   "$CLI" --db "$DB" delete $DPK --hard >/dev/null 2>&1
 else
   echo "  SKIP  (seed has one journal)"
@@ -317,6 +330,117 @@ ok "delete dry-run left row" "$(sqlite3 "$DB" "select coalesce(ZRECENTLYDELETED,
 "$CLI" --db "$DB" edit 999999 --body x --dry-run >/dev/null 2>&1
 ok "edit dry-run validates id" "$?" "1"
 "$CLI" --db "$DB" delete $DRPK --hard >/dev/null 2>&1
+
+# Probe the capability rather than parsing help text: --dry-run writes
+# nothing, so this just asks whether this CLI understands --markdown at all.
+# The Python reference in CI does not, and skips the block.
+"$CLI" --db "$DB" write --body probe --markdown --dry-run >/dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "T17 markdown rendering"
+  MD=$(printf '###### Reflect on today:\n1\\. first thing\n\n---\n\nIt was **hard**\\. See [my site](https://example.com)\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e \xf0\x9f\x9a\x95')
+  MDOUT=$(printf '%s' "$MD" | "$CLI" --db "$DB" write --title 'Day 9 \- Naoshima' --markdown 2>&1)
+  MDPK=$(echo "$MDOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  MDTEXT=$("$CLI" --db "$DB" show $MDPK --json | jq_ 'd["text"]')
+  ok "heading marker stripped"  "$(printf '%s' "$MDTEXT" | grep -c '#')" "0"
+  ok "escapes removed"          "$(printf '%s' "$MDTEXT" | grep -c '\\\\\.')" "0"
+  ok "horizontal rule dropped"  "$(printf '%s' "$MDTEXT" | grep -cE '^---$')" "0"
+  ok "emphasis markers gone"    "$(printf '%s' "$MDTEXT" | grep -c '\*\*')" "0"
+  ok "heading text kept"        "$(printf '%s' "$MDTEXT" | grep -c 'Reflect on today:')" "1"
+  ok "link flattened"           "$(printf '%s' "$MDTEXT" | grep -c 'my site (https://example.com)')" "1"
+  JP=$(printf '\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e')
+  ok "unicode preserved"        "$(printf '%s' "$MDTEXT" | grep -cF "$JP")" "1"
+  ok "title de-escaped"         "$("$CLI" --db "$DB" show $MDPK --json | jq_ 'd["title"]')" "Day 9 - Naoshima"
+  ok "bold run in RTF"          "$(sqlite3 "$DB" "select instr(cast(ZTEXT as text),'\\b')>0 from ZJOURNALENTRYMO where Z_PK=$MDPK;")" "1"
+  ok "bold font in RTF"         "$(sqlite3 "$DB" "select instr(cast(ZTEXT as text),'Bold')>0 from ZJOURNALENTRYMO where Z_PK=$MDPK;")" "1"
+  LMD=$(printf -- '- alpha\n- beta\n\n1. one\n2. two\n\n~~gone~~ and *slanted*')
+  LOUT=$(printf '%s' "$LMD" | "$CLI" --db "$DB" write --markdown 2>&1)
+  LPK3=$(echo "$LOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  rtfhas() { sqlite3 "$DB" "select instr(cast(ZTEXT as text),'$2')>0 from ZJOURNALENTRYMO where Z_PK=$1;"; }
+  ok "bulleted list in RTF"  "$(rtfhas $LPK3 disc)" "1"
+  ok "numbered list in RTF"  "$(rtfhas $LPK3 decimal)" "1"
+  ok "list markers emitted"  "$(rtfhas $LPK3 listtext)" "1"
+  ok "strikethrough in RTF"  "$(rtfhas $LPK3 strike)" "1"
+  ok "italic in RTF"         "$(rtfhas $LPK3 '\i ')" "1"
+  ok "list bullets stripped" "$("$CLI" --db "$DB" show $LPK3 --json | jq_ 'd["text"]' | grep -c '^- ')" "0"
+  ESC=$(printf -- '1\\. literal not a list')
+  EOUT3=$(printf '%s' "$ESC" | "$CLI" --db "$DB" write --markdown 2>&1)
+  EPK3=$(echo "$EOUT3" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "escaped number stays plain" "$("$CLI" --db "$DB" show $EPK3 --json | jq_ 'd["text"]')" "1. literal not a list"
+  ok "escaped number is not a list" "$(sqlite3 "$DB" "select instr(cast(ZTEXT as text),'listtext') from ZJOURNALENTRYMO where Z_PK=$EPK3;")" "0"
+
+  ESC2=$(printf -- 'a \\*literal\\* pair and \\_under\\_ too')
+  E2OUT=$(printf '%s' "$ESC2" | "$CLI" --db "$DB" write --markdown 2>&1)
+  E2PK=$(echo "$E2OUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "escaped emphasis stays literal" "$("$CLI" --db "$DB" show $E2PK --json | jq_ 'd["text"]')" "a *literal* pair and _under_ too"
+  ok "escaped emphasis not italic"    "$(sqlite3 "$DB" "select instr(cast(ZTEXT as text),'Italic') from ZJOURNALENTRYMO where Z_PK=$E2PK;")" "0"
+  # fix-text decides what to repair by comparing an entry's stored bytes with
+  # `render` output, so that equality is load-bearing.
+  rt_check() {
+    RTO=$(printf '%s' "$1" | "$CLI" --db "$DB" write --markdown 2>&1)
+    RTP=$(echo "$RTO" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+    STORED=$(sqlite3 "$DB" "select hex(ZTEXT) from ZJOURNALENTRYMO where Z_PK=$RTP;")
+    WANT=$(printf '%s' "$1" | "$CLI" render | xxd -p | tr -d '\n' | tr 'a-f' 'A-F')
+    [ "$STORED" = "$WANT" ] && echo 1 || echo 0
+  }
+  ok "render matches stored: italic"  "$(rt_check '*all italic here*')" "1"
+  ok "render matches stored: escaped" "$(rt_check '\*\*literal\*\* stays')" "1"
+  ok "render matches stored: fenced"  "$(rt_check '```
+# comment inside code
+```')" "1"
+  ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
+  ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
+  ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
+  ok "image syntax untouched"         "$(printf '![alt](https://e.com/i.png)' | "$CLI" render --plain)" '![alt](https://e.com/i.png)'
+  ok "real link still flattened"      "$(printf '[real](https://x.com)' | "$CLI" render --plain)" 'real (https://x.com)'
+  TOOUT=$("$CLI" --db "$DB" write --markdown --title 'Summary check' 2>&1)
+  ok "title-only summary not empty"   "$(printf '%s' "$TOOUT" | grep -c 'empty')" "0"
+  ok "backslash before non-escapable" "$(printf 'C:\\Users\\omar' | "$CLI" render --plain)" 'C:\Users\omar'
+  ok "unterminated code stays literal" "$(printf 'a `**x** b' | "$CLI" render --plain)" 'a `**x** b'
+  ok "unterminated code not bolded"   "$(printf 'a `**x** b' | "$CLI" render | grep -c 'Bold')" "0"
+  TRI=$(printf '***both***' | "$CLI" render)
+  ok "triple emphasis is bold"        "$(printf '%s' "$TRI" | grep -c 'Bold')" "1"
+  ok "triple emphasis is italic"      "$(printf '%s' "$TRI" | grep -c 'Italic')" "1"
+  ok "escapes verbatim in code"       "$(printf 'a `\\*x\\*` b' | "$CLI" render --plain)" "a \`\\*x\\*\` b"
+  ok "escapes applied outside code"   "$(printf 'a \\*x\\* b' | "$CLI" render --plain)" "a *x* b"
+  PUA=$(python3 -c 'import sys;sys.stdout.write("a\ue000b")')
+  ok "private-use scalar survives"    "$(printf '%s' "$PUA" | "$CLI" render --plain)" "$PUA"
+  "$CLI" --db "$DB" write --markdown --title '   ' >/dev/null 2>&1
+  ok "blank title rejected"           "$?" "1"
+  ok "title keeps rule-like text"     "$(printf -- '---' | "$CLI" render --inline)" "---"
+  ok "title de-escapes"               "$(printf 'Day 9 \\- N' | "$CLI" render --inline)" "Day 9 - N"
+  # Whether an RTF round trip keeps generated list markers differs by macOS
+  # release, so assert the invariant fix-text relies on -- that a stored entry
+  # reads back exactly as `render --plain` says it will -- not a literal.
+  LSRC=$(printf -- '- alpha\n- beta')
+  LWOUT=$(printf '%s' "$LSRC" | "$CLI" --db "$DB" write --markdown 2>&1)
+  LWPK=$(echo "$LWOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "stored list text matches render" "$("$CLI" --db "$DB" show $LWPK --json | jq_ 'd["text"]')" "$(printf '%s' "$LSRC" | "$CLI" render --plain)"
+  LWTEXT=$("$CLI" --db "$DB" show $LWPK --json | jq_ 'd["text"]')
+  ok "list length matches visible"    "$(sqlite3 "$DB" "select ZTEXTLENGTH from ZJOURNALENTRYMO where Z_PK=$LWPK;")" "$(printf '%s' "$LWTEXT" | wc -m | tr -d ' ')"
+  TOUT=$("$CLI" --db "$DB" write --markdown --title 'Only a title' 2>&1)
+  TPK=$(echo "$TOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "title-only entry allowed"       "$("$CLI" --db "$DB" show $TPK --json | jq_ 'd["title"]')" "Only a title"
+  ok "title-only stored list-title"   "$("$CLI" --db "$DB" write --markdown --title '1. first' 2>&1 | grep -c 'Created entry')" "1"
+  ok "inline code not bolded"         "$(printf 'Use `**lit**` here' | "$CLI" render | grep -c 'Bold')" "0"
+  ok "code span does not block bold"  "$(printf '`x` and **b**' | "$CLI" render | grep -c 'Bold')" "1"
+
+  UOUT=$(printf 'foo__bar__baz and __real bold__' | "$CLI" --db "$DB" write --markdown 2>&1)
+  UPK=$(echo "$UOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "intraword __ stays literal" "$("$CLI" --db "$DB" show $UPK --json | jq_ 'd["text"]')" "foo__bar__baz and real bold"
+
+  CRLF=$(printf 'first\r\nsecond\r\nthird')
+  COUT=$(printf '%s' "$CRLF" | "$CLI" --db "$DB" write --markdown 2>&1)
+  CPK=$(echo "$COUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "CRLF does not double-space" "$("$CLI" --db "$DB" show $CPK --json | jq_ 'd["text"]' | grep -c '^$')" "0"
+  ok "CRLF keeps all lines"       "$("$CLI" --db "$DB" show $CPK --json | jq_ 'd["text"]' | grep -c .)" "3"
+
+  PLAINOUT=$("$CLI" --db "$DB" write --body '## not markdown mode' 2>&1)
+  PLAINPK=$(echo "$PLAINOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "plain mode leaves text alone" "$("$CLI" --db "$DB" show $PLAINPK --json | jq_ 'd["text"]')" "## not markdown mode"
+
+else
+  echo "T17 markdown rendering (skipped: this CLI has no --markdown)"
+fi
 
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"

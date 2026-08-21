@@ -18,6 +18,7 @@ python3 $S import "Travel Journal" --into "Travel" --target-db "$SANDBOX"
 python3 $S import "Travel Journal" --into "Travel" --prune-backups
 python3 $S fix-export "Travel Journal" ~/path/to/export --rename --enrich --flag-missing
 python3 $S fix-locations "Travel Journal"     # repair locations from photo EXIF
+python3 $S fix-text "Travel Journal"          # re-render entries showing raw Markdown
 ```
 
 Files: `dayone.py` reads the store, `exifgps.py` is a dependency-free JPEG
@@ -85,6 +86,18 @@ journal-cli --db "$DB" journals --json      # verify counts, then spot-check
 
 Then replay the identical command without `--target-db`.
 
+Imports made with journal-cli 1.0.6 or earlier can look correctly categorized
+on the Mac while another device places every imported entry in the default
+Journal. Repair those existing memberships once with:
+
+```sh
+journal-cli sync-journals --dry-run
+journal-cli sync-journals --live
+```
+
+The repair queues the custom journal records for re-upload; it does not rewrite
+the imported entries or their media.
+
 - **The target journal must already exist** in Journal.app — create it there
   first (journal-cli cannot create journals).
 - **Quit Journal.app** before a live run; `journal-cli` refuses while it runs.
@@ -97,6 +110,50 @@ Then replay the identical command without `--target-db`.
   the Trash as it goes, keeping the pre-run snapshot and the newest one.
 - Stops after `--max-failures` (default 5) so a systemic problem cannot
   quietly mangle thousands of entries.
+
+## Formatting: Day One writes Markdown, Journal renders rich text
+
+Journal stores entry text as RTF and renders it, but it does not understand
+Markdown -- so syntax left in place is shown literally, and an imported
+entry reads "###### Reflect on today:" instead of a bold heading. Day One
+also escapes punctuation ("1\\." when the author meant a literal "1."),
+which surfaces as stray backslashes.
+
+The import passes the original Markdown to `journal-cli --markdown`, which
+renders the subset Journal actually supports:
+
+| Markdown | becomes |
+|---|---|
+| `# ...` through `###### ...` | bold text (Journal has no heading levels) |
+| `**bold**`, `*italic*`, `~~struck~~` | bold, italic, strikethrough |
+| `- item` / `1. item` | real bulleted and numbered lists |
+| `> quote` | an indented paragraph |
+| `[text](url)` | `text (url)` |
+| `---` rules, ``` fences | removed |
+| `\\.` `\\-` escaping | unescaped |
+
+Escaping is why list detection runs *before* unescaping: Day One writes
+"1\\. text" precisely when the author did not want a list, so those stay
+plain while genuine `1. text` becomes a numbered list.
+
+### Repairing entries imported before this existed
+
+`fix-text` re-renders imported entries from their original Markdown. It
+decides what needs work by asking `journal-cli render` what the entry's
+source *should* produce and comparing that with what is stored, byte for
+byte.
+
+That exactness matters. Sniffing the stored text for leftover syntax cannot
+tell a correctly rendered `**literal**` (whose source was escaped) or a
+fenced `# comment` from genuinely unrendered markup, so a sniffing check
+flags those entries forever and rewrites them on every run.
+
+```sh
+python3 $S fix-text "Omar's Journal" --dry-run     # always look first
+python3 $S fix-text "Omar's Journal"
+```
+
+Safe to re-run: a second pass reports zero entries needing work.
 
 ## Fixing wrong locations
 
@@ -163,8 +220,8 @@ Always `--dry-run` first; it prints every rename it intends to make.
   iCloud**. Say roughly how much data that is before starting.
 - Day One may be mid-sync; its entry counts can move between runs. Re-run
   `plan` if a count looks off.
-- Day One's per-entry `activity`, weather, tags, and rich-text styling have
-  no home in Apple Journal and are dropped. Say so rather than implying
+- Day One's per-entry `activity`, weather and tags have no home in Apple
+  Journal and are dropped. Say so rather than implying
   a lossless move.
 - **Do not trust Day One's location or timezone for an entry written after
   the fact.** Both record where the app was, not where the events were. When
