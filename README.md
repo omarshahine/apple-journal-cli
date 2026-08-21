@@ -1,4 +1,4 @@
-# journal-cli
+# apple-journal-cli
 
 **Read and write Apple Journal entries from the terminal.** Text, photos,
 videos, Live Photos, web links, location pins, bookmarks, multiple journals —
