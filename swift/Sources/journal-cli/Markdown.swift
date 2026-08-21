@@ -337,11 +337,12 @@ func markdownToRTF(_ md: String) -> (data: Data, plain: String) {
                           documentAttributes: [:]) else {
         die("could not build RTF from markdown")
     }
-    // Round-trip for the plain half: callers use it for ZTEXTLENGTH and for
-    // emptiness, and the attributed string still carries generated list
-    // markers that the stored entry will not show.
-    let plain = NSAttributedString(rtf: d, documentAttributes: nil)?.string ?? att.string
-    return (d, plain)
+    // Decode the plain half with rtfToText -- the same function every read
+    // path uses -- so ZTEXTLENGTH and the emptiness check describe exactly
+    // what `show` will return. Doing it any other way drifts: generated list
+    // markers survive the round trip on some macOS releases but not others,
+    // and rtfToText trims surrounding whitespace.
+    return (d, rtfToText(d))
 }
 
 /// The text as it reads once stored: rendering to RTF and parsing back drops
@@ -351,11 +352,10 @@ func markdownToRTF(_ md: String) -> (data: Data, plain: String) {
 func markdownToPlain(_ md: String) -> String {
     let att = markdownToAttributed(md)
     guard let d = att.rtf(from: NSRange(location: 0, length: att.length),
-                          documentAttributes: [:]),
-          let round = NSAttributedString(rtf: d, documentAttributes: nil) else {
-        return att.string
+                          documentAttributes: [:]) else {
+        return att.string.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    return round.string
+    return rtfToText(d)
 }
 
 /// Inline-only stripping, for single-line fields such as the title. Block
