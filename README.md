@@ -96,8 +96,13 @@ journal-cli edit 103 --live --remove-media 700        # asset ids shown by `show
 journal-cli edit 103 --live --remove-all-media
 journal-cli edit 103 --live --date 2024-03-05 --bookmark   # or --no-bookmark
 
-journal-cli delete 103 --live          # soft delete (Recently Deleted)
-journal-cli delete 103 --live --hard   # remove row, assets, and files
+# target a journal (default: the app's default journal)
+journal-cli journals                                  # list journals
+journal-cli write --live --journal "Test Journal" --body "..."
+journal-cli edit 103 --live --journal "Test Journal"  # move an entry
+
+journal-cli delete 103 --live          # soft delete; the deletion syncs
+journal-cli delete 103 --live --hard   # ONLY for never-synced entries (see below)
 ```
 
 To rehearse anything without risk, work against a throwaway copy:
@@ -197,10 +202,8 @@ Beyond assets:
 - **Written entries have no CRDT.** They carry `ZTEXT` only. Journal renders and
   syncs them fine and does not backfill one, but concurrent edits on two devices
   may not merge the way a natively-created entry would.
-- **No multiple journals.** Journal supports several journals; new entries go to
-  the first one in `ZJOURNALMO`.
-- **No Recently Deleted management.** `delete` without `--hard` moves an entry
-  there, but there is no restore or empty command.
+- **No Recently Deleted restore/empty.** `delete` without `--hard` moves an
+  entry there (and the deletion syncs); there is no restore command yet.
 - **No audio.** Journal can record audio entries; this cannot.
 - **No reflection prompts.** `ZPROMPT` / `ZREFLECTIONPROMPT` are read-only
   curiosities here.
@@ -216,10 +219,13 @@ Beyond assets:
   when the name is ambiguous) against `Photos.sqlite`, or from the UUID when
   the file comes straight out of a `.photoslibrary`. Files Photos does not
   know about are attached unlinked, with a warning.
-- Deleting a synced row is only partly verified. Locally it is clean and the
-  entry does not come back after a resync, but whether the CloudKit record is
-  tombstoned or merely orphaned was not confirmed, and other devices were not
-  checked. Prefer deleting through Journal.app when in doubt.
+- **Hard-deleting a synced entry resurrects it.** Confirmed empirically: four
+  hard-deleted synced entries came back hours later with new Z_PKs — a local
+  row delete does not tombstone the CloudKit record, and sync re-creates the
+  entry. `delete --hard` therefore refuses synced entries unless `--force` is
+  passed. The safe paths are a soft delete (the CLI marks the flagged row
+  unsynced, Journal's engine uploads the deletion, and the entry lands in
+  Recently Deleted everywhere) or deleting in Journal.app.
 - Live writes need Full Disk Access, which macOS can revoke mid-session; see
   Troubleshooting.
 
@@ -230,11 +236,12 @@ tests/test_write.sh                                   # seeds from the live stor
 JOURNAL_SEED=~/Backups/journal-cli/<ts>/moments.sqlite tests/test_write.sh
 ```
 
-82 assertions against a throwaway copy: argument guards, insert bookkeeping,
+93 assertions against a throwaway copy: argument guards, insert bookkeeping,
 RTF round-trip, location metadata and coordinates, photo/video asset rows,
 attachment file layout on disk, asset ordering, Markdown export of media and
 locations, every `edit` operation (including media removal) and its CRDT guard, image
-resizing, Live Photo pairing, Photos-library linkage, soft and hard delete, `PRAGMA integrity_check`, and a check that the
+resizing, Live Photo pairing, Photos-library linkage, journal targeting and
+the journals listing, the synced hard-delete guard, soft and hard delete, `PRAGMA integrity_check`, and a check that the
 source store never moved.
 
 `JOURNAL_SEED` runs the whole suite off a backup, so tests need no Full Disk

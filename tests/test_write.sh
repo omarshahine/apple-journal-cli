@@ -92,7 +92,7 @@ ok "ordering has both" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING
 
 echo "T6 export includes media + location"
 EXP="$SB/exp"; "$CLI" --db "$DB" export --dir "$EXP" >/dev/null 2>&1
-ok "location in frontmatter" "$(grep -rl 'Space Needle' "$EXP" | wc -l | tr -d ' ')" "1"
+ok "location in frontmatter" "$(grep -l 'Space Needle' "$EXP"/*-"$LPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
 ok "export wrote files" "$([ "$(ls "$EXP" | wc -l | tr -d ' ')" -gt 50 ] && echo yes || echo no)" "yes"
 ok "media linked for media entry" "$(grep -l '_resized' "$EXP"/*-"$MPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
 ok "media linked for combo entry" "$(grep -l '_resized' "$EXP"/*-"$BPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
@@ -219,6 +219,45 @@ PLOUT=$("$CLI" --db "$DB" write --body "Linked." --media "$PL" --photos-link 2>&
 PLPK=$(echo "$PLOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 ok "assetIdentifier written" "$("$CLI" --db "$DB" show $PLPK --json >/dev/null 2>&1; sqlite3 "$DB" "select instr(ZASSETMETADATA,'AABBCCDD-1111-2222-3333-444455556666/L0/001')>1 from ZJOURNALENTRYASSETMO where ZENTRY=$PLPK;")" "1"
 "$CLI" --db "$DB" delete $PLPK --hard >/dev/null 2>&1
+
+echo "T12 journals"
+NJ=$(sqlite3 "$DB" "select count(*) from ZJOURNALMO where coalesce(ZUSERDELETED,0)=0;")
+if [ "$NJ" -ge 2 ]; then
+  TJPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where ZMERGEABLEATTRIBUTES is not null limit 1;")
+  ok "journals lists both" "$("$CLI" --db "$DB" journals --json | jq_ 'len(d)')" "$NJ"
+  ok "name resolved from CRDT" "$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$TJPK'][0]["name"]')" "Test Journal"
+  JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "Test Journal" 2>&1)
+  JPK=$(echo "$JOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "join row written" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$JPK;")" "$TJPK"
+  DOUT=$("$CLI" --db "$DB" write --body "In the default journal." 2>&1)
+  DPK=$(echo "$DOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "default write has no join row" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  "$CLI" --db "$DB" edit $DPK --journal "Test Journal" >/dev/null 2>&1
+  ok "edit moves into journal" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "$TJPK"
+  "$CLI" --db "$DB" edit $DPK --journal 1 >/dev/null 2>&1
+  ok "edit moves back to default (join row dropped)" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  "$CLI" --db "$DB" write --body x --journal "No Such Journal" >/dev/null 2>&1
+  ok "unknown journal rejected" "$?" "1"
+  "$CLI" --db "$DB" delete $JPK --hard >/dev/null 2>&1
+  "$CLI" --db "$DB" delete $DPK --hard >/dev/null 2>&1
+else
+  echo "  SKIP  (seed has one journal)"
+fi
+
+echo "T13 synced hard-delete guard"
+SPKS=$(sqlite3 "$DB" "select Z_PK from ZJOURNALENTRYMO where ZISUPLOADEDTOCLOUD=1 and coalesce(ZRECENTLYDELETED,0)=0 limit 1;")
+if [ -n "$SPKS" ]; then
+  "$CLI" --db "$DB" delete $SPKS --hard >/dev/null 2>&1
+  ok "hard delete refused on synced entry" "$?" "1"
+  ok "row survived" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO where Z_PK=$SPKS;")" "1"
+  "$CLI" --db "$DB" delete $SPKS --hard --force >/dev/null 2>&1
+  ok "--force overrides" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO where Z_PK=$SPKS;")" "0"
+fi
+SOFTPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALENTRYMO where ZISUPLOADEDTOCLOUD=1 and coalesce(ZRECENTLYDELETED,0)=0 limit 1;")
+if [ -n "$SOFTPK" ]; then
+  "$CLI" --db "$DB" delete $SOFTPK >/dev/null 2>&1
+  ok "soft delete marks unsynced" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$SOFTPK;")" "0"
+fi
 
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"

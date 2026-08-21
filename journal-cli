@@ -408,6 +408,62 @@ def cmd_stats(a):
         print(f"  {y}  {by_year[y]:>4}  {'#' * min(by_year[y], 50)}")
 
 
+# ---------------------------------------------------------------- journals
+
+def journal_rows(conn):
+    out = []
+    for r in conn.execute("""select Z_PK, ZMERGEABLEATTRIBUTES, ZSORTCATEGORY
+                             from ZJOURNALMO where coalesce(ZUSERDELETED,0)=0
+                             order by Z_PK"""):
+        blob = r["ZMERGEABLEATTRIBUTES"]
+        name = "Journal"          # the built-in default has no CRDT blob
+        if blob:
+            import re as _re
+            cand = _re.findall(rb'[\x20-\x7e\xc2-\xf4][\x20-\x7e\x80-\xbf]{2,}', blob)
+            cand = [c.decode("utf-8", "replace") for c in cand]
+            if "title" in cand:
+                i = cand.index("title")
+                if i > 0: name = cand[i - 1]
+        out.append({"pk": r["Z_PK"], "name": name,
+                    "default": blob is None and r["ZSORTCATEGORY"] is not None
+                               and r["ZSORTCATEGORY"] < 0})
+    return out
+
+def resolve_journal(conn, sel):
+    """sel is a name or a pk. Returns (pk, name, is_default)."""
+    rows = journal_rows(conn)
+    if str(sel).isdigit():
+        for j in rows:
+            if j["pk"] == int(sel): return j["pk"], j["name"], j["default"]
+        die(f"no journal with id {sel}")
+    hits = [j for j in rows if j["name"].lower() == str(sel).lower()]
+    if len(hits) == 1:
+        return hits[0]["pk"], hits[0]["name"], hits[0]["default"]
+    if not hits:
+        die(f"no journal named {sel!r}. Have: " + ", ".join(f"{j['name']} ({j['pk']})" for j in rows))
+    die(f"journal name {sel!r} is ambiguous; use the id: " +
+        ", ".join(str(j["pk"]) for j in hits))
+
+def cmd_journals(a):
+    with Snapshot() as c:
+        rows = journal_rows(c)
+        live = ("coalesce(e.ZISFULLYREMOVED,0)=0 and coalesce(e.ZRECENTLYDELETED,0)=0 "
+                "and coalesce(e.ZISTIP,0)=0 and e.ZENTRYDATE is not null")
+        counts = dict(c.execute(f"""select j.Z_6JOURNALS, count(*) from Z_5JOURNALS j
+                                    join ZJOURNALENTRYMO e on e.Z_PK=j.Z_5ENTRIES
+                                    where {live} group by 1"""))
+        unassigned = c.execute(f"""select count(*) from ZJOURNALENTRYMO e
+                                   where {live}
+                                     and not exists(select 1 from Z_5JOURNALS j where j.Z_5ENTRIES=e.Z_PK)""").fetchone()[0]
+    if a.json:
+        for j in rows: j["entries"] = counts.get(j["pk"], 0) + (unassigned if j["default"] else 0)
+        print(json.dumps(rows, indent=2)); return
+    for j in rows:
+        n = counts.get(j["pk"], 0) + (unassigned if j["default"] else 0)
+        tag = "  (default)" if j["default"] else ""
+        print(f"{j['pk']:>3}  {j['name']:<24} {n:>4} entries{tag}")
+
+
 # ---------------------------------------------------------------- write
 
 def next_pk(conn, kind):
@@ -543,10 +599,19 @@ def cmd_write(a):
             conn.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",
                          (json.dumps(ordering).encode(), pk))
 
+        if a.journal:
+            jpk, jname, jdefault = resolve_journal(conn, a.journal)
+            if not jdefault:
+                conn.execute("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
+                             (pk, jpk))
+        # no --journal: the entry lands in the default journal implicitly (no join
+        # row), matching how most native entries are stored
+
     bits = [f"{len(body)} chars"] if body.strip() else []
     if media: bits.append(f"{len(media)} media")
     if lp: bits.append("1 live photo")
     if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
+    if a.journal: bits.append(f"journal {a.journal!r}")
     print(f"Created entry {pk} ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}.")
 
 def ordering_append(conn, pk, new_uuids):
@@ -610,7 +675,7 @@ def cmd_edit(a):
     bookmark = True if a.bookmark else (False if a.no_bookmark else None)
     touches_text = body is not None or a.title is not None
     if not any([touches_text, media, has_loc, a.clear_location,
-                a.remove_media, a.remove_all_media,
+                a.remove_media, a.remove_all_media, a.journal,
                 a.date is not None, bookmark is not None]):
         die("nothing to change")
 
@@ -687,6 +752,13 @@ def cmd_edit(a):
 
         if added: ordering_append(conn, a.id, added)
 
+        if a.journal:
+            jpk, jname, jdefault = resolve_journal(conn, a.journal)
+            conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (a.id,))
+            if not jdefault:
+                conn.execute("insert into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
+                             (a.id, jpk))
+
     bits = []
     if body is not None: bits.append("body")
     if a.title is not None: bits.append("title")
@@ -696,12 +768,19 @@ def cmd_edit(a):
     if has_loc: bits.append("location set")
     if media: bits.append(f"{len(media)} media added")
     if a.remove_media or a.remove_all_media: bits.append(f"{removed} media removed")
+    if a.journal: bits.append(f"moved to journal {a.journal!r}")
     print(f"Updated entry {a.id} ({', '.join(bits)}).")
 
 def cmd_delete(a):
     with Live(allow_live_default=a.live) as conn:
-        row = conn.execute("select Z_PK, ZID from ZJOURNALENTRYMO where Z_PK=?", (a.id,)).fetchone()
+        row = conn.execute("""select Z_PK, ZID, ZISUPLOADEDTOCLOUD
+                              from ZJOURNALENTRYMO where Z_PK=?""", (a.id,)).fetchone()
         if not row: die(f"no entry with id {a.id}")
+        if a.hard and row["ZISUPLOADEDTOCLOUD"] and not a.force:
+            die(f"entry {a.id} has synced to iCloud. A local hard delete does not\n"
+                "  tombstone the CloudKit record, and the entry RESURRECTS on the next\n"
+                "  sync (verified). Use a soft delete (no --hard), delete it in\n"
+                "  Journal.app, or pass --force if you accept the resurrection risk.")
         if a.hard:
             apks = [r[0] for r in conn.execute(
                 "select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", (a.id,))]
@@ -717,9 +796,10 @@ def cmd_delete(a):
             what = f"hard-deleted (with {len(apks)} assets)"
         else:
             conn.execute("""update ZJOURNALENTRYMO
-                            set ZRECENTLYDELETED=1, ZRECENTLYDELETEDENTRYDATE=?, ZUPDATEDDATE=?
+                            set ZRECENTLYDELETED=1, ZRECENTLYDELETEDENTRYDATE=?, ZUPDATEDDATE=?,
+                                ZISUPLOADEDTOCLOUD=0
                             where Z_PK=?""", (cd_now(), cd_now(), a.id))
-            what = "marked deleted (Recently Deleted)"
+            what = "marked deleted (Recently Deleted); deletion will sync"
     print(f"Entry {a.id} {what}.")
 
 def cmd_sandbox(a):
@@ -781,6 +861,9 @@ def main():
     e = sub.add_parser("export"); e.add_argument("--dir", required=True)
     e.add_argument("--format", choices=["md", "json"], default="md"); e.set_defaults(func=cmd_export)
 
+    j = sub.add_parser("journals", help="list journals")
+    j.add_argument("--json", action="store_true"); j.set_defaults(func=cmd_journals)
+
     sub.add_parser("stats").set_defaults(func=cmd_stats)
     sub.add_parser("doctor").set_defaults(func=cmd_doctor)
 
@@ -797,6 +880,7 @@ def main():
     w.add_argument("--lat", type=float); w.add_argument("--lon", type=float)
     w.add_argument("--place", help="place name for the location pin")
     w.add_argument("--city")
+    w.add_argument("--journal", help="journal name or id (default: the app's default journal)")
     w.add_argument("--live", action="store_true", help="allow writing to the real store")
     w.set_defaults(func=cmd_write)
 
@@ -815,6 +899,7 @@ def main():
     ed.add_argument("--lat", type=float); ed.add_argument("--lon", type=float)
     ed.add_argument("--place"); ed.add_argument("--city")
     ed.add_argument("--clear-location", action="store_true")
+    ed.add_argument("--journal", help="move the entry to this journal (name or id)")
     ed.add_argument("--force", action="store_true",
                     help="edit text even when the entry has a CRDT copy")
     ed.add_argument("--live", action="store_true")
@@ -822,6 +907,8 @@ def main():
 
     d = sub.add_parser("delete"); d.add_argument("id", type=int)
     d.add_argument("--hard", action="store_true"); d.add_argument("--live", action="store_true")
+    d.add_argument("--force", action="store_true",
+                   help="hard-delete even a synced entry (it may resurrect from iCloud)")
     d.set_defaults(func=cmd_delete)
 
     sb = sub.add_parser("sandbox"); sb.add_argument("--dir", required=True)
