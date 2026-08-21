@@ -125,6 +125,39 @@ journal-cli empty --live               # purge never-synced deleted entries
 journal-cli delete 103 --live --hard   # full row+file removal (guarded, see below)
 ```
 
+## Coming from Day One?
+
+`skills/dayone-import/` migrates Day One journals into Apple Journal, entry
+by entry, with photos, locations, titles and bookmarks intact.
+
+```sh
+S=skills/dayone-import/scripts/dayone-import.py
+
+python3 $S journals                    # list Day One journals
+python3 $S plan "Travel Journal"       # what imports, and what can't
+python3 $S import "Travel Journal" --into "Travel" --target-db "$(journal-cli sandbox --dir /tmp/r)"
+python3 $S import "Travel Journal" --into "Travel"
+```
+
+It reads Day One's own SQLite store rather than its markdown export, because
+the export **renders every timestamp in the exporting machine's timezone**.
+Entries written abroad come out hours off and some land on the wrong day. The
+original zone is in the store, so the import can preserve the wall clock you
+actually experienced. `fix-export` repairs an export you already have.
+
+Two more things it knows:
+
+- **Day One's location is where the *app* was**, not where the photos were
+  taken — entries written up later carry your home address. `fix-locations`
+  corrects them from photo EXIF, corroborated against the Photos library so a
+  camera with a stale GPS fix can't drag a whole trip to one spot.
+- **Day One keeps media cloud-only** until asked. A journal can look complete
+  in the app while almost nothing is on disk. `plan` reports the shortfall
+  before you import anything.
+
+Imports are resumable, keyed by Day One's entry UUIDs, so re-running never
+double-writes.
+
 ## Agent-friendly by design
 
 journal-cli is built to be driven by AI agents and scripts as much as by
@@ -143,9 +176,9 @@ humans:
   hands back a disposable copy of the store; every other command accepts
   `--db` (or `$JOURNAL_DB`) to target it. Agents can rehearse a write with
   zero risk, then replay it `--live`.
-- **A skill ships in-repo** — `skills/journal-cli/SKILL.md` teaches
+- **Skills ship in-repo** — `skills/journal-cli/SKILL.md` teaches
   Claude-style agents the command surface, the safety model, and the sharp
-  edges.
+  edges; `skills/dayone-import/SKILL.md` covers migrating from Day One.
 
 ## Safety model
 
