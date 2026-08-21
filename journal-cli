@@ -224,6 +224,11 @@ def meta_blob(obj):
 
 def parse_meta(b):
     if not b: return None
+    if b[:1] == b"\x02":
+        # version 2: a bare UUID reference to an externally stored payload
+        # (seen on drawing, workoutRoute, and link assets)
+        try: return {"ref": b[1:].rstrip(b"\x00").decode("ascii")}
+        except Exception: return None
     try: return json.loads(b[1:] if b[:1] == b"\x01" else b)
     except Exception: return None
 

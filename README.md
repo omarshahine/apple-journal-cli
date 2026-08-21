@@ -129,7 +129,9 @@ and written beside that database rather than in your real `Attachments/`.
 | location | `ZJOURNALENTRYASSETMO` type `multiPinMap`, source `locationPicker`, `ZISSLIM=1` |
 | asset order | `ZASSETORDERING`, plain JSON `[assetUUID, index, ...]` |
 
-Asset metadata (`ZASSETMETADATA`) is **one version byte `0x01` followed by JSON**.
+Asset metadata (`ZASSETMETADATA`) is **one version byte `0x01` followed by
+JSON**; a `0x02` version byte instead carries a bare UUID reference to an
+externally stored payload (drawing, workoutRoute, and link assets).
 For a location that is `{"revision":2,"visitsData":[{latitude, longitude,
 placeName, city, visitStartTime, ...}]}`. For a photo it carries `latitude`,
 `longitude`, `placeName`, crop rects and `date`.
