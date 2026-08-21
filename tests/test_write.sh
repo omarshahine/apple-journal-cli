@@ -390,6 +390,13 @@ if [ $? -eq 0 ]; then
   ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
   ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
   ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
+  PUA=$(python3 -c 'import sys;sys.stdout.write("a\ue000b")')
+  ok "private-use scalar survives"    "$(printf '%s' "$PUA" | "$CLI" render --plain)" "$PUA"
+  LLOUT=$(printf -- '- alpha\n- beta' | "$CLI" --db "$DB" write --markdown 2>&1)
+  LLPK=$(echo "$LLOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "list length matches visible"    "$(sqlite3 "$DB" "select ZTEXTLENGTH from ZJOURNALENTRYMO where Z_PK=$LLPK;")" "10"
+  "$CLI" --db "$DB" write --markdown --title '   ' >/dev/null 2>&1
+  ok "blank title rejected"           "$?" "1"
   ok "title keeps rule-like text"     "$(printf -- '---' | "$CLI" render --inline)" "---"
   ok "title de-escapes"               "$(printf 'Day 9 \\- N' | "$CLI" render --inline)" "Day 9 - N"
   ok "list plain omits markers"       "$(printf -- '- alpha\n- beta' | "$CLI" render --plain)" "alpha

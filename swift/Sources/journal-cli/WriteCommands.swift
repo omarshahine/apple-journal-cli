@@ -78,7 +78,8 @@ func cmdWrite(_ a: Args) {
     let link = a.value("--link")
     let hasText = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     let title = a.value("--title").map { a.has("--markdown") ? markdownToInlinePlain($0) : $0 }
-    if !hasText && title == nil && media.isEmpty && lp == nil && !hasLoc && link == nil {
+    let hasTitle = !(title ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    if !hasText && !hasTitle && media.isEmpty && lp == nil && !hasLoc && link == nil {
         die("nothing to write (need --title, --body/--body-file/stdin, --media, --live-photo, --link, or --lat/--lon)")
     }
 

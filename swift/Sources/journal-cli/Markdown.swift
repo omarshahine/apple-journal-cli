@@ -44,15 +44,29 @@ private let EMPH = rx("(?<![\\w*_])([*_])(?=\\S)([^*_]+?)(?<=\\S)\\1(?![\\w*_])"
 // italics -- so each one is swapped for a private-use codepoint before the
 // emphasis regexes run and swapped back afterwards.
 private let ESCAPABLE = Array("\\`*_{}[]()#+-.!>~|")
-private let ESCAPE_BASE: UInt32 = 0xE000
 
-private func protectEscapes(_ s: String) -> String {
+/// Pick a private-use window this text does not already use, so a literal
+/// U+E000 in someone's entry is never mistaken for our own sentinel and
+/// rewritten as punctuation.
+private func escapeBase(for s: String) -> UInt32 {
+    let width = UInt32(ESCAPABLE.count)
+    let used = Set(s.unicodeScalars.map { $0.value }.filter { $0 >= 0xE000 && $0 <= 0xF8FF })
+    if used.isEmpty { return 0xE000 }
+    var base: UInt32 = 0xE000
+    while base + width <= 0xF8FF {
+        if !(base..<(base + width)).contains(where: { used.contains($0) }) { return base }
+        base += width
+    }
+    return 0xE000
+}
+
+private func protectEscapes(_ s: String, _ base: UInt32) -> String {
     var out = ""
     var escaping = false
     for ch in s {
         if escaping {
             if let i = ESCAPABLE.firstIndex(of: ch),
-               let scalar = Unicode.Scalar(ESCAPE_BASE + UInt32(i)) {
+               let scalar = Unicode.Scalar(base + UInt32(i)) {
                 out.unicodeScalars.append(scalar)
             } else {
                 out.append("\\")
@@ -74,14 +88,14 @@ private func protectEscapes(_ s: String) -> String {
 /// asterisks rather than turning "literal" bold. Mapping the span's
 /// delimiters onto the same private-use range hides them from the emphasis
 /// regexes, and restoreEscapes puts them back untouched.
-private func protectCodeSpans(_ s: String) -> String {
+private func protectCodeSpans(_ s: String, _ base: UInt32) -> String {
     guard s.contains("`") else { return s }
     var out = ""
     var span: String? = nil
     for ch in s {
         if ch == "`" {
             if let body = span {
-                out.append(hideAll("`" + body + "`"))
+                out.append(hideAll("`" + body + "`", base))
                 span = nil
             } else {
                 span = ""
@@ -97,11 +111,11 @@ private func protectCodeSpans(_ s: String) -> String {
 }
 
 /// Map every escapable character in a string onto the private-use range.
-private func hideAll(_ s: String) -> String {
+private func hideAll(_ s: String, _ base: UInt32) -> String {
     var out = ""
     for ch in s {
         if let i = ESCAPABLE.firstIndex(of: ch),
-           let scalar = Unicode.Scalar(ESCAPE_BASE + UInt32(i)) {
+           let scalar = Unicode.Scalar(base + UInt32(i)) {
             out.unicodeScalars.append(scalar)
         } else {
             out.append(ch)
@@ -110,13 +124,13 @@ private func hideAll(_ s: String) -> String {
     return out
 }
 
-private func restoreEscapes(_ s: String) -> String {
+private func restoreEscapes(_ s: String, _ base: UInt32) -> String {
     var out = ""
     for ch in s {
         let u = ch.unicodeScalars
         if u.count == 1, let v = u.first?.value,
-           v >= ESCAPE_BASE, v < ESCAPE_BASE + UInt32(ESCAPABLE.count) {
-            out.append(ESCAPABLE[Int(v - ESCAPE_BASE)])
+           v >= base, v < base + UInt32(ESCAPABLE.count) {
+            out.append(ESCAPABLE[Int(v - base)])
         } else {
             out.append(ch)
         }
@@ -155,7 +169,8 @@ private enum LineKind: Equatable {
 
 /// Pull inline emphasis out of a line, leaving styled spans behind.
 private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
-    var s = protectCodeSpans(protectEscapes(line))
+    let base = escapeBase(for: line)
+    var s = protectCodeSpans(protectEscapes(line, base), base)
 
     // "[text](url)" -> "text (url)", or just the url when the label adds nothing.
     while let m = LINK.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) {
@@ -179,7 +194,7 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
     var bold = false, italic = false, strike = false
     func flush() {
         if !cur.isEmpty {
-            spans.append(Span(text: restoreEscapes(cur), bold: bold || forceBold,
+            spans.append(Span(text: restoreEscapes(cur, base), bold: bold || forceBold,
                               italic: italic, strike: strike))
             cur = ""
         }
@@ -322,7 +337,11 @@ func markdownToRTF(_ md: String) -> (data: Data, plain: String) {
                           documentAttributes: [:]) else {
         die("could not build RTF from markdown")
     }
-    return (d, att.string)
+    // Round-trip for the plain half: callers use it for ZTEXTLENGTH and for
+    // emptiness, and the attributed string still carries generated list
+    // markers that the stored entry will not show.
+    let plain = NSAttributedString(rtf: d, documentAttributes: nil)?.string ?? att.string
+    return (d, plain)
 }
 
 /// The text as it reads once stored: rendering to RTF and parsing back drops
