@@ -8,11 +8,19 @@ DIR="${1:?usage: make-fixture.sh DIR}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$DIR"
 DB="$DIR/moments.sqlite"
-# `trash` is macOS 26+; CI runs older releases, so fall back there.
-for f in "$DB" "$DB-wal" "$DB-shm"; do
-  [ -e "$f" ] || continue
-  if command -v trash >/dev/null 2>&1; then trash "$f"; else rm -f "$f"; fi
-done
+# Retire any previous fixture instead of deleting it: `trash` is macOS 26+,
+# and on older hosts moving it aside keeps the old copy recoverable.
+if [ -e "$DB" ]; then
+  if command -v trash >/dev/null 2>&1; then
+    for f in "$DB" "$DB-wal" "$DB-shm"; do [ -e "$f" ] && trash "$f"; done
+  else
+    OLD="$DIR/superseded-$$"
+    mkdir -p "$OLD"
+    for f in "$DB" "$DB-wal" "$DB-shm"; do
+      [ -e "$f" ] && mv "$f" "$OLD/"
+    done
+  fi
+fi
 
 sqlite3 "$DB" < "$HERE/fixture-schema.sql"
 

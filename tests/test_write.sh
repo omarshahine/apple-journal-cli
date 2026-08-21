@@ -390,6 +390,11 @@ if [ $? -eq 0 ]; then
   ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
   ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
   ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
+  TRI=$(printf '***both***' | "$CLI" render)
+  ok "triple emphasis is bold"        "$(printf '%s' "$TRI" | grep -c 'Bold')" "1"
+  ok "triple emphasis is italic"      "$(printf '%s' "$TRI" | grep -c 'Italic')" "1"
+  ok "escapes verbatim in code"       "$(printf 'a `\\*x\\*` b' | "$CLI" render --plain)" "a \`\\*x\\*\` b"
+  ok "escapes applied outside code"   "$(printf 'a \\*x\\* b' | "$CLI" render --plain)" "a *x* b"
   PUA=$(python3 -c 'import sys;sys.stdout.write("a\ue000b")')
   ok "private-use scalar survives"    "$(printf '%s' "$PUA" | "$CLI" render --plain)" "$PUA"
   "$CLI" --db "$DB" write --markdown --title '   ' >/dev/null 2>&1

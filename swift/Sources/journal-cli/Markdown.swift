@@ -33,6 +33,8 @@ private let BULLET = rx("^[ \\t]{0,3}[-*+][ \\t]+(.*)$")
 private let ORDERED = rx("^[ \\t]{0,3}[0-9]{1,9}[.)][ \\t]+(.*)$")
 private let QUOTE = rx("^[ \\t]{0,3}>[ \\t]?(.*)$")
 private let LINK = rx("\\[([^\\]]*)\\]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
+private let TRIPLE_STAR = rx("\\*\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*\\*")
+private let TRIPLE_UNDER = rx("(?<![\\w_])___(?=\\S)(.+?)(?<=\\S)___(?![\\w_])")
 private let STRONG_STAR = rx("\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*")
 // Underscores need flanking rules that asterisks do not: "foo__bar__baz" is
 // an identifier, not emphasis.
@@ -60,53 +62,51 @@ private func escapeBase(for s: String) -> UInt32 {
     return 0xE000
 }
 
-private func protectEscapes(_ s: String, _ base: UInt32) -> String {
+// One pass over the line, so precedence is explicit: a backslash escape makes
+// the next character inert, a backtick opens a code span whose contents are
+// taken verbatim (escapes included), and both are hidden in the private-use
+// range where the emphasis regexes cannot see them.
+private func protectInline(_ s: String, _ base: UInt32) -> String {
     var out = ""
     var escaping = false
+    var inCode = false
+    var code = ""
+    func hide(_ ch: Character) {
+        if let i = ESCAPABLE.firstIndex(of: ch),
+           let scalar = Unicode.Scalar(base + UInt32(i)) {
+            out.unicodeScalars.append(scalar)
+        } else {
+            out.append(ch)
+        }
+    }
     for ch in s {
-        if escaping {
-            if let i = ESCAPABLE.firstIndex(of: ch),
-               let scalar = Unicode.Scalar(base + UInt32(i)) {
-                out.unicodeScalars.append(scalar)
+        if inCode {
+            if ch == "`" {
+                out.append(hideAll("`" + code + "`", base))
+                inCode = false
+                code = ""
             } else {
-                out.append("\\")
-                out.append(ch)
+                code.append(ch)
             }
+            continue
+        }
+        if escaping {
+            hide(ch)
             escaping = false
         } else if ch == "\\" {
             escaping = true
+        } else if ch == "`" {
+            inCode = true
+            code = ""
         } else {
             out.append(ch)
         }
+    }
+    if inCode {                            // unterminated span stays literal
+        out.append(hideAll("`", base))
+        out.append(code)
     }
     if escaping { out.append("\\") }        // a trailing lone backslash
-    return out
-}
-
-/// Inline code spans are not styled (Journal has no code run), but their
-/// contents must survive verbatim: "Use `**literal**`" should keep its
-/// asterisks rather than turning "literal" bold. Mapping the span's
-/// delimiters onto the same private-use range hides them from the emphasis
-/// regexes, and restoreEscapes puts them back untouched.
-private func protectCodeSpans(_ s: String, _ base: UInt32) -> String {
-    guard s.contains("`") else { return s }
-    var out = ""
-    var span: String? = nil
-    for ch in s {
-        if ch == "`" {
-            if let body = span {
-                out.append(hideAll("`" + body + "`", base))
-                span = nil
-            } else {
-                span = ""
-            }
-        } else if span != nil {
-            span?.append(ch)
-        } else {
-            out.append(ch)
-        }
-    }
-    if let unterminated = span { out.append("`"); out.append(unterminated) }
     return out
 }
 
@@ -170,7 +170,7 @@ private enum LineKind: Equatable {
 /// Pull inline emphasis out of a line, leaving styled spans behind.
 private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
     let base = escapeBase(for: line)
-    var s = protectCodeSpans(protectEscapes(line, base), base)
+    var s = protectInline(line, base)
 
     // "[text](url)" -> "text (url)", or just the url when the label adds nothing.
     while let m = LINK.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) {
@@ -184,6 +184,10 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
 
     // Mark emphasis with sentinels so the spans survive unescaping.
     let B = "\u{1}", I = "\u{2}", S = "\u{3}"
+    // Triple delimiters first: otherwise the strong pass eats two and the
+    // emphasis pass eats the rest, losing bold from "***both***".
+    s = sub(s, TRIPLE_STAR, "\(B)\(I)$1\(I)\(B)")
+    s = sub(s, TRIPLE_UNDER, "\(B)\(I)$1\(I)\(B)")
     s = sub(s, STRONG_STAR, "\(B)$1\(B)")
     s = sub(s, STRONG_UNDER, "\(B)$1\(B)")
     s = sub(s, STRIKE, "\(S)$2\(S)")

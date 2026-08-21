@@ -402,13 +402,16 @@ def _stored(cli, target_db):
     # would be matched against a different database entirely.
     db = target_db or os.environ.get("JOURNAL_DB") or os.path.expanduser(
         "~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite")
-    rtf, rtf_ok = {}, True
+    rtf, crdt, rtf_ok = {}, set(), True
     try:
         con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
-        for pk, blob in con.execute(
-                "select Z_PK, ZTEXT from ZJOURNALENTRYMO where ZTEXT is not null"):
-            rtf[pk] = (bytes(blob) if isinstance(blob, (bytes, bytearray))
-                       else str(blob).encode("utf-8"))
+        for pk, blob, merge in con.execute(
+                "select Z_PK, ZTEXT, ZMERGEABLEATTRIBUTES from ZJOURNALENTRYMO"):
+            if blob is not None:
+                rtf[pk] = (bytes(blob) if isinstance(blob, (bytes, bytearray))
+                           else str(blob).encode("utf-8"))
+            if merge is not None:
+                crdt.add(pk)
         con.close()
     except sqlite3.Error:
         # Without the RTF we cannot tell rendered from unrendered formatting.
@@ -417,7 +420,8 @@ def _stored(cli, target_db):
         rtf_ok = False
         sys.stderr.write("note: could not read entry RTF from %s; checking "
                          "visible text only.\n" % db)
-    return ({pk: (t[0], t[1], rtf.get(pk)) for pk, t in text.items()}, rtf_ok)
+    return ({pk: (t[0], t[1], rtf.get(pk)) for pk, t in text.items()},
+            rtf_ok, crdt)
 
 
 # Formatting controls that carry meaning, counted so two RTF documents can be
@@ -467,7 +471,7 @@ def cmd_fix_text(args):
     if not state["done"]:
         die("no import state at %s -- run `import` first" % state_path)
 
-    stored, rtf_ok = _stored(args.cli, args.target_db)
+    stored, rtf_ok, crdt = _stored(args.cli, args.target_db)
     if _render(args.cli, "probe") is None:
         die("%s has no `render` command -- upgrade journal-cli" % args.cli)
 
@@ -476,12 +480,19 @@ def cmd_fix_text(args):
     # a correctly rendered "**literal**" (from escaped source) or a fenced
     # "# comment" from unrendered markup, so it kept flagging good entries
     # forever. An exact comparison is idempotent by construction.
-    todo, reasons = [], collections.Counter()
+    todo, reasons, edited = [], collections.Counter(), []
     for e in entries:
         pk = state["done"].get(e["uuid"])
         if not isinstance(pk, int) or pk not in stored:
             continue
         title, text, rtf = stored[pk]
+        # An entry edited in Journal since import carries Journal's own CRDT
+        # copy of the text. journal-cli refuses to rewrite those without
+        # --force, and forcing would discard the user's edit -- so leave them
+        # alone and say which ones rather than failing partway through.
+        if pk in crdt:
+            edited.append((e, pk))
+            continue
         why = None
 
         want_title = _render(args.cli, e.get("title_md") or e["title"] or "",
@@ -509,6 +520,16 @@ def cmd_fix_text(args):
         if why:
             reasons[why] += 1
             todo.append((e, pk))
+
+    if edited:
+        print("Skipped %d entr%s edited in Journal since import (they carry "
+              "Journal's own copy of the text; re-rendering would discard "
+              "your edit):" % (len(edited), "y" if len(edited) == 1 else "ies"))
+        for e, pk in edited[:5]:
+            print("   [%s] %s" % (pk, (e["title"] or "(untitled)")[:52]))
+        if len(edited) > 5:
+            print("   ... and %d more" % (len(edited) - 5))
+        print()
 
     print("%d of %d imported entries need re-rendering."
           % (len(todo), len(state["done"])))
