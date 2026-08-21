@@ -48,7 +48,19 @@ jobs:
           echo "ARCHIVE=journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" >> "$GITHUB_ENV"
 
       - name: Build universal binary
-        run: swift build -c release --arch arm64 --arch x86_64
+        # Per-triple builds + lipo instead of `--arch a --arch b`: the multi-arch
+        # flag routes through Xcode's swbuild daemon, which can wedge; the
+        # per-triple path uses SwiftPM's own build engine.
+        run: |
+          set -euo pipefail
+          swift build -c release --triple arm64-apple-macosx
+          swift build -c release --triple x86_64-apple-macosx
+          mkdir -p .build/apple/Products/Release
+          lipo -create \
+            .build/arm64-apple-macosx/release/journal-cli \
+            .build/x86_64-apple-macosx/release/journal-cli \
+            -output .build/apple/Products/Release/journal-cli
+          file .build/apple/Products/Release/journal-cli
         working-directory: swift
 
       - name: Test the release binary
