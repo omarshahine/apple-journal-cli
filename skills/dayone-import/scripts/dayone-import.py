@@ -364,14 +364,21 @@ def cmd_fix_locations(args):
     print("\nRelocated %d of %d." % (ok, len(fixes)))
 
 
+# Syntax the renderer strips. If any of it is still visible in the stored
+# plain text, that entry was never rendered. Underscore forms carry flanking
+# rules so identifiers like foo__bar__baz are not mistaken for emphasis.
 ARTIFACTS = [
-    re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+"),          # ###### heading
-    re.compile(r"\\[\\`*_{}\[\]()#+\-.!>~|]"),           # \. \- escaping
-    re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,})[ \t]*$"),   # --- rule
-    re.compile(r"\*\*\S.*?\S\*\*"),                       # **bold**
-    re.compile(r"\[[^\]]+\]\([^)\s]+\)"),                 # [text](url)
+    re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+"),              # ###### heading
+    re.compile(r"\\[\\`*_{}\[\]()#+\-.!>~|]"),               # \. \- escaping
+    re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$"),  # --- *** ___ rule
+    re.compile(r"(?m)^[ \t]*```"),                           # fenced code
+    re.compile(r"(?m)^[ \t]{0,3}>[ \t]?\S"),                  # > blockquote
+    re.compile(r"\*\*\S.*?\S\*\*"),                            # **bold**
+    re.compile(r"(?<![\w_])__(?=\S).+?(?<=\S)__(?![\w_])"),   # __bold__
+    re.compile(r"(?<![\w_])_(?=\S)[^_\n]+?(?<=\S)_(?![\w_])"),  # _italic_
+    re.compile(r"~~\S.*?\S~~"),                              # ~~struck~~
+    re.compile(r"\[[^\]]+\]\([^)\s]+\)"),                      # [text](url)
 ]
-
 
 # A backslash escape and the character it protects, replaced wholesale before
 # looking for formatting so the escaped delimiter cannot match.
@@ -379,9 +386,11 @@ ESCAPED_PAIR = re.compile(r"\\.", re.S)
 
 # Constructs in the Day One source that must survive as real formatting.
 SOURCE_FEATURES = {
-    "bold": re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+\S|\*\*\S.*?\S\*\*"),
+    "bold": re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+\S|\*\*\S.*?\S\*\*"
+                       r"|(?<![\w_])__(?=\S).+?(?<=\S)__(?![\w_])"),
     "list": re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]+\S"),
-    "italic": re.compile(r"(?<![\w*])\*(?=\S)[^*\n]+?(?<=\S)\*(?![\w*])"),
+    "italic": re.compile(r"(?<![\w*])\*(?=\S)[^*\n]+?(?<=\S)\*(?![\w*])"
+                         r"|(?<![\w_])_(?=\S)[^_\n]+?(?<=\S)_(?![\w_])"),
     "strike": re.compile(r"~~\S.*?\S~~"),
 }
 # ...and the RTF markup each one produces.
@@ -411,7 +420,7 @@ def _stored(cli, target_db):
 
     db = target_db or os.path.expanduser(
         "~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite")
-    rtf = {}
+    rtf, rtf_ok = {}, True
     try:
         con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
         for pk, blob in con.execute(
@@ -420,8 +429,13 @@ def _stored(cli, target_db):
                        if isinstance(blob, (bytes, bytearray)) else str(blob))
         con.close()
     except sqlite3.Error:
-        pass                       # fall back to plain-text checks only
-    return {pk: (t[0], t[1], rtf.get(pk, "")) for pk, t in text.items()}
+        # Without the RTF we cannot tell rendered from unrendered formatting.
+        # Say so and check only what plain text can prove, rather than
+        # treating every entry as having lost its markup.
+        rtf_ok = False
+        sys.stderr.write("note: could not read entry RTF from %s; checking "
+                         "visible text only.\n" % db)
+    return ({pk: (t[0], t[1], rtf.get(pk, "")) for pk, t in text.items()}, rtf_ok)
 
 
 def cmd_fix_text(args):
@@ -438,7 +452,7 @@ def cmd_fix_text(args):
     if not state["done"]:
         die("no import state at %s -- run `import` first" % state_path)
 
-    stored = _stored(args.cli, args.target_db)
+    stored, rtf_ok = _stored(args.cli, args.target_db)
     todo, reasons = [], collections.Counter()
     for e in entries:
         pk = state["done"].get(e["uuid"])
@@ -448,7 +462,7 @@ def cmd_fix_text(args):
         why = None
         if any(p.search(title + "\n" + text) for p in ARTIFACTS):
             why = "raw markdown visible"
-        else:
+        elif rtf_ok:
             # Only the body is stored as RTF; the title is a separate plain
             # field. Comparing title markup against the body's RTF would
             # never match and would rewrite the entry on every run.
