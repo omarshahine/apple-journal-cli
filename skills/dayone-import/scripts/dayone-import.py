@@ -337,7 +337,9 @@ def cmd_fix_locations(args):
         return
 
     ok = 0
-    for e, pk, got, off, place, city in fixes:
+    backups_before = (set(_backup_dirs())
+                      if not args.target_db and args.prune_backups else set())
+    for n, (e, pk, got, off, place, city) in enumerate(fixes, 1):
         cmd = [args.cli]
         if args.target_db:
             cmd += ["--db", args.target_db]
@@ -355,6 +357,10 @@ def cmd_fix_locations(args):
                              % (pk, (r.stderr or r.stdout).strip().split("\n")[-1]))
         else:
             ok += 1
+        if backups_before and n % 25 == 0:
+            _prune_backups(backups_before)
+    if backups_before:
+        _prune_backups(backups_before)
     print("\nRelocated %d of %d." % (ok, len(fixes)))
 
 
@@ -439,7 +445,10 @@ def cmd_fix_text(args):
         if any(p.search(title + "\n" + text) for p in ARTIFACTS):
             why = "raw markdown visible"
         else:
-            source = (e.get("title_md") or "") + "\n" + (e.get("body_md") or "")
+            # Only the body is stored as RTF; the title is a separate plain
+            # field. Comparing title markup against the body's RTF would
+            # never match and would rewrite the entry on every run.
+            source = e.get("body_md") or ""
             for name, pat in SOURCE_FEATURES.items():
                 if pat.search(source) and RTF_MARKERS[name] not in rtf:
                     why = "lost %s formatting" % name
@@ -464,6 +473,8 @@ def cmd_fix_text(args):
         return
 
     ok = fail = 0
+    backups_before = (set(_backup_dirs())
+                      if not args.target_db and args.prune_backups else set())
     for n, (e, pk) in enumerate(todo, 1):
         cmd = [args.cli]
         if args.target_db:
@@ -495,6 +506,10 @@ def cmd_fix_text(args):
             ok += 1
         if n % 100 == 0:
             print("   %d/%d" % (n, len(todo)))
+        if backups_before and n % 25 == 0:
+            _prune_backups(backups_before)
+    if backups_before:
+        _prune_backups(backups_before)
     print("\nRewrote %d, failed %d." % (ok, fail))
 
 
@@ -728,6 +743,8 @@ def main():
     s.add_argument("--trust-exif", action="store_true",
                    help="override existing locations even when the Photos "
                         "library has no matching asset to corroborate them")
+    s.add_argument("--prune-backups", action="store_true",
+                   help="trash the per-write store snapshots as they pile up")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_fix_locations)
 
@@ -739,6 +756,8 @@ def main():
     s.add_argument("--cli", default="journal-cli")
     s.add_argument("--state", help="import state file to map entries by")
     s.add_argument("--max-failures", type=int, default=5)
+    s.add_argument("--prune-backups", action="store_true",
+                   help="trash the per-write store snapshots as they pile up")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_fix_text)
 

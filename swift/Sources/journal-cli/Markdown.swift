@@ -36,7 +36,49 @@ private let LINK = rx("\\[([^\\]]*)\\]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
 private let STRONG = rx("(\\*\\*|__)(?=\\S)(.+?)(?<=\\S)\\1")
 private let STRIKE = rx("(~~)(?=\\S)(.+?)(?<=\\S)\\1")
 private let EMPH = rx("(?<![\\w*_])([*_])(?=\\S)([^*_]+?)(?<=\\S)\\1(?![\\w*_])")
-private let ESCAPED = rx("\\\\([\\\\`*_{}\\[\\]()#+\\-.!>~|])")
+// Characters Markdown lets you escape. An escaped delimiter must survive
+// emphasis parsing intact -- "\\*literal\\*" is a literal asterisk pair, not
+// italics -- so each one is swapped for a private-use codepoint before the
+// emphasis regexes run and swapped back afterwards.
+private let ESCAPABLE = Array("\\`*_{}[]()#+-.!>~|")
+private let ESCAPE_BASE: UInt32 = 0xE000
+
+private func protectEscapes(_ s: String) -> String {
+    var out = ""
+    var escaping = false
+    for ch in s {
+        if escaping {
+            if let i = ESCAPABLE.firstIndex(of: ch),
+               let scalar = Unicode.Scalar(ESCAPE_BASE + UInt32(i)) {
+                out.unicodeScalars.append(scalar)
+            } else {
+                out.append("\\")
+                out.append(ch)
+            }
+            escaping = false
+        } else if ch == "\\" {
+            escaping = true
+        } else {
+            out.append(ch)
+        }
+    }
+    if escaping { out.append("\\") }        // a trailing lone backslash
+    return out
+}
+
+private func restoreEscapes(_ s: String) -> String {
+    var out = ""
+    for ch in s {
+        let u = ch.unicodeScalars
+        if u.count == 1, let v = u.first?.value,
+           v >= ESCAPE_BASE, v < ESCAPE_BASE + UInt32(ESCAPABLE.count) {
+            out.append(ESCAPABLE[Int(v - ESCAPE_BASE)])
+        } else {
+            out.append(ch)
+        }
+    }
+    return out
+}
 
 private func sub(_ s: String, _ re: NSRegularExpression, _ tmpl: String) -> String {
     re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s),
@@ -69,7 +111,7 @@ private enum LineKind: Equatable {
 
 /// Pull inline emphasis out of a line, leaving styled spans behind.
 private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
-    var s = line
+    var s = protectEscapes(line)
 
     // "[text](url)" -> "text (url)", or just the url when the label adds nothing.
     while let m = LINK.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) {
@@ -86,14 +128,13 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
     s = sub(s, STRONG, "\(B)$2\(B)")
     s = sub(s, STRIKE, "\(S)$2\(S)")
     s = sub(s, EMPH, "\(I)$2\(I)")
-    s = sub(s, ESCAPED, "$1")
 
     var spans: [Span] = []
     var cur = ""
     var bold = false, italic = false, strike = false
     func flush() {
         if !cur.isEmpty {
-            spans.append(Span(text: cur, bold: bold || forceBold,
+            spans.append(Span(text: restoreEscapes(cur), bold: bold || forceBold,
                               italic: italic, strike: strike))
             cur = ""
         }
@@ -141,7 +182,11 @@ func markdownToAttributed(_ md: String) -> NSAttributedString {
     var contents: [[Span]] = []
     var inFence = false
 
-    for raw in md.components(separatedBy: .newlines) {
+    // CRLF must not split twice: .newlines treats \r and \n as separate
+    // delimiters, which would insert a blank line after every source line.
+    let normalized = md.replacingOccurrences(of: "\r\n", with: "\n")
+                       .replacingOccurrences(of: "\r", with: "\n")
+    for raw in normalized.components(separatedBy: "\n") {
         if hits(raw, FENCE) { inFence.toggle(); continue }
         if inFence {
             kinds.append(.body)
