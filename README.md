@@ -28,7 +28,7 @@ brew install omarshahine/tap/journal-cli
 # or
 npm install -g apple-journal-cli
 # or from source
-git clone https://github.com/omarshahine/journal-cli && cd journal-cli/swift
+git clone https://github.com/omarshahine/apple-journal-cli && cd apple-journal-cli/swift
 swift build -c release && cp .build/release/journal-cli /usr/local/bin/
 ```
 

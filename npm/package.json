@@ -10,10 +10,10 @@
     "cli",
     "diary"
   ],
-  "homepage": "https://github.com/omarshahine/journal-cli",
+  "homepage": "https://github.com/omarshahine/apple-journal-cli",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/omarshahine/journal-cli.git"
+    "url": "git+https://github.com/omarshahine/apple-journal-cli.git"
   },
   "license": "MIT",
   "author": "Omar Shahine",
