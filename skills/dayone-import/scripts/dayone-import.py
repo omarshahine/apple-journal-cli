@@ -364,44 +364,6 @@ def cmd_fix_locations(args):
     print("\nRelocated %d of %d." % (ok, len(fixes)))
 
 
-# Syntax the renderer strips. If any of it is still visible in the stored
-# plain text, that entry was never rendered. Underscore forms carry flanking
-# rules so identifiers like foo__bar__baz are not mistaken for emphasis.
-ARTIFACTS = [
-    re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+"),              # ###### heading
-    re.compile(r"\\[\\`*_{}\[\]()#+\-.!>~|]"),               # \. \- escaping
-    re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$"),  # --- *** ___ rule
-    re.compile(r"(?m)^[ \t]*```"),                           # fenced code
-    re.compile(r"(?m)^[ \t]{0,3}>[ \t]?\S"),                  # > blockquote
-    re.compile(r"\*\*\S.*?\S\*\*"),                            # **bold**
-    re.compile(r"(?<![\w_])__(?=\S).+?(?<=\S)__(?![\w_])"),   # __bold__
-    re.compile(r"(?<![\w_])_(?=\S)[^_\n]+?(?<=\S)_(?![\w_])"),  # _italic_
-    re.compile(r"~~\S.*?\S~~"),                              # ~~struck~~
-    re.compile(r"\[[^\]]+\]\([^)\s]+\)"),                      # [text](url)
-]
-
-# A backslash escape and the character it protects, replaced wholesale before
-# looking for formatting so the escaped delimiter cannot match.
-ESCAPED_PAIR = re.compile(r"\\.", re.S)
-
-# Constructs in the Day One source that must survive as real formatting.
-SOURCE_FEATURES = {
-    "bold": re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+\S|\*\*\S.*?\S\*\*"
-                       r"|(?<![\w_])__(?=\S).+?(?<=\S)__(?![\w_])"),
-    "list": re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]+\S"),
-    "italic": re.compile(r"(?<![\w*])\*(?=\S)[^*\n]+?(?<=\S)\*(?![\w*])"
-                         r"|(?<![\w_])_(?=\S)[^_\n]+?(?<=\S)_(?![\w_])"),
-    "strike": re.compile(r"~~\S.*?\S~~"),
-}
-# ...and the RTF markup each one produces.
-RTF_MARKERS = {
-    "bold": "Bold",
-    "list": "listtext",
-    "italic": "\\i ",
-    "strike": "\\strike",
-}
-
-
 def _stored(cli, target_db):
     """pk -> (title, plain text, raw RTF) for entries currently in the store.
 
@@ -425,8 +387,8 @@ def _stored(cli, target_db):
         con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
         for pk, blob in con.execute(
                 "select Z_PK, ZTEXT from ZJOURNALENTRYMO where ZTEXT is not null"):
-            rtf[pk] = (blob.decode("utf-8", "replace")
-                       if isinstance(blob, (bytes, bytearray)) else str(blob))
+            rtf[pk] = (bytes(blob) if isinstance(blob, (bytes, bytearray))
+                       else str(blob).encode("utf-8"))
         con.close()
     except sqlite3.Error:
         # Without the RTF we cannot tell rendered from unrendered formatting.
@@ -435,7 +397,15 @@ def _stored(cli, target_db):
         rtf_ok = False
         sys.stderr.write("note: could not read entry RTF from %s; checking "
                          "visible text only.\n" % db)
-    return ({pk: (t[0], t[1], rtf.get(pk, "")) for pk, t in text.items()}, rtf_ok)
+    return ({pk: (t[0], t[1], rtf.get(pk)) for pk, t in text.items()}, rtf_ok)
+
+
+def _render(cli, md, plain=False):
+    """What journal-cli --markdown would store for this source, or None."""
+    cmd = [cli, "render"] + (["--plain"] if plain else [])
+    r = subprocess.run(cmd, input=(md or "").encode("utf-8"),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return None if r.returncode else r.stdout
 
 
 def cmd_fix_text(args):
@@ -453,6 +423,14 @@ def cmd_fix_text(args):
         die("no import state at %s -- run `import` first" % state_path)
 
     stored, rtf_ok = _stored(args.cli, args.target_db)
+    if _render(args.cli, "probe") is None:
+        die("%s has no `render` command -- upgrade journal-cli" % args.cli)
+
+    # Compare each entry against what the renderer would produce now, rather
+    # than sniffing the stored text for leftover syntax. Sniffing cannot tell
+    # a correctly rendered "**literal**" (from escaped source) or a fenced
+    # "# comment" from unrendered markup, so it kept flagging good entries
+    # forever. An exact comparison is idempotent by construction.
     todo, reasons = [], collections.Counter()
     for e in entries:
         pk = state["done"].get(e["uuid"])
@@ -460,20 +438,31 @@ def cmd_fix_text(args):
             continue
         title, text, rtf = stored[pk]
         why = None
-        if any(p.search(title + "\n" + text) for p in ARTIFACTS):
-            why = "raw markdown visible"
-        elif rtf_ok:
-            # Only the body is stored as RTF; the title is a separate plain
-            # field. Comparing title markup against the body's RTF would
-            # never match and would rewrite the entry on every run.
-            # Neutralize backslash-escaped characters first: "\\*literal\\*"
-            # is not emphasis, and matching it here would report lost
-            # formatting and rewrite the same entry on every run.
-            source = ESCAPED_PAIR.sub("x", e.get("body_md") or "")
-            for name, pat in SOURCE_FEATURES.items():
-                if pat.search(source) and RTF_MARKERS[name] not in rtf:
-                    why = "lost %s formatting" % name
-                    break
+
+        want_title = _render(args.cli, e.get("title_md") or e["title"] or "",
+                             plain=True)
+        if want_title is not None and want_title.decode("utf-8", "replace") != title:
+            why = "title differs from rendered source"
+
+        body_md = e.get("body_md")
+        if body_md is None:
+            body_md = e["body"] or ""
+        if why is None and rtf_ok:
+            want = _render(args.cli, body_md)
+            want_plain = _render(args.cli, body_md, plain=True) or b""
+            if want is None:
+                pass
+            elif not want_plain.strip():
+                if rtf is not None:
+                    why = "body should be empty"
+            elif rtf != want:
+                why = "body differs from rendered source"
+        elif why is None:
+            want_plain = _render(args.cli, body_md, plain=True)
+            if want_plain is not None and \
+                    want_plain.decode("utf-8", "replace") != text:
+                why = "body text differs from rendered source"
+
         if why:
             reasons[why] += 1
             todo.append((e, pk))

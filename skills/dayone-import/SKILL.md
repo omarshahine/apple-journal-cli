@@ -127,12 +127,14 @@ plain while genuine `1. text` becomes a numbered list.
 ### Repairing entries imported before this existed
 
 `fix-text` re-renders imported entries from their original Markdown. It
-checks two things, because an entry can read correctly as plain text while
-having silently lost its formatting:
+decides what needs work by asking `journal-cli render` what the entry's
+source *should* produce and comparing that with what is stored, byte for
+byte.
 
-- raw Markdown still visible in the text, and
-- source constructs (headings, emphasis, lists) whose RTF markup is missing
-  from the stored entry.
+That exactness matters. Sniffing the stored text for leftover syntax cannot
+tell a correctly rendered `**literal**` (whose source was escaped) or a
+fenced `# comment` from genuinely unrendered markup, so a sniffing check
+flags those entries forever and rewrites them on every run.
 
 ```sh
 python3 $S fix-text "Omar's Journal" --dry-run     # always look first

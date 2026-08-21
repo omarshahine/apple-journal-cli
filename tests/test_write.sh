@@ -360,6 +360,22 @@ if [ $? -eq 0 ]; then
   E2PK=$(echo "$E2OUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "escaped emphasis stays literal" "$("$CLI" --db "$DB" show $E2PK --json | jq_ 'd["text"]')" "a *literal* pair and _under_ too"
   ok "escaped emphasis not italic"    "$(sqlite3 "$DB" "select instr(cast(ZTEXT as text),'Italic') from ZJOURNALENTRYMO where Z_PK=$E2PK;")" "0"
+  # fix-text decides what to repair by comparing an entry's stored bytes with
+  # `render` output, so that equality is load-bearing.
+  rt_check() {
+    RTO=$(printf '%s' "$1" | "$CLI" --db "$DB" write --markdown 2>&1)
+    RTP=$(echo "$RTO" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+    STORED=$(sqlite3 "$DB" "select hex(ZTEXT) from ZJOURNALENTRYMO where Z_PK=$RTP;")
+    WANT=$(printf '%s' "$1" | "$CLI" render | xxd -p | tr -d '\n' | tr 'a-f' 'A-F')
+    [ "$STORED" = "$WANT" ] && echo 1 || echo 0
+  }
+  ok "render matches stored: italic"  "$(rt_check '*all italic here*')" "1"
+  ok "render matches stored: escaped" "$(rt_check '\*\*literal\*\* stays')" "1"
+  ok "render matches stored: fenced"  "$(rt_check '```
+# comment inside code
+```')" "1"
+  ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
+
   UOUT=$(printf 'foo__bar__baz and __real bold__' | "$CLI" --db "$DB" write --markdown 2>&1)
   UPK=$(echo "$UOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "intraword __ stays literal" "$("$CLI" --db "$DB" show $UPK --json | jq_ 'd["text"]')" "foo__bar__baz and real bold"

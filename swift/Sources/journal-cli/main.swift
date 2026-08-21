@@ -35,6 +35,8 @@ WRITE (guarded: --live required against the real store; auto-backup first)
   restore   <id> [--live]
   empty     [--force] [--live]
   sandbox   --dir DIR [--from DB]      copy the store somewhere safe for testing
+  render    [--body B | --body-file F | stdin] [--plain]
+            render Markdown to RTF (or plain text) on stdout; writes nothing
 
   --markdown renders the body (and de-escapes the title) as Markdown into
   Journal's rich text: headings and **bold** become real formatting rather
@@ -60,7 +62,7 @@ guard let cmd = argv.first, cmd != "--help", cmd != "-h", cmd != "help" else {
 let rest = Array(argv.dropFirst())
 
 let boolFlags: Set<String> = ["--json", "--full", "--include-empty", "--bookmark",
-                              "--dry-run", "--accept-risk", "--markdown",
+                              "--dry-run", "--accept-risk", "--markdown", "--plain",
                               "--no-bookmark", "--live", "--hard", "--force",
                               "--clear-location", "--remove-all-media",
                               "--photos-link", "--no-resize"]
@@ -87,6 +89,7 @@ case "delete":   cmdDelete(a)
 case "restore":  cmdRestore(a)
 case "empty":    cmdEmpty(a)
 case "sandbox":  cmdSandbox(a)
+case "render":   cmdRender(a)
 default:
     die("unknown command '\(cmd)'\n\n\(HELP)")
 }

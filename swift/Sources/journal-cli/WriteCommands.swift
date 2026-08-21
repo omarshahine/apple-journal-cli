@@ -38,6 +38,18 @@ private func readBody(_ a: Args) -> String? {
     return nil
 }
 
+// Render Markdown the way `write --markdown` would, without touching a store.
+// Lets callers compare an entry's stored text against what it *should* be,
+// which is exact where sniffing for leftover syntax is guesswork.
+func cmdRender(_ a: Args) {
+    let md = readBody(a) ?? ""
+    if a.has("--plain") {
+        FileHandle.standardOutput.write(Data(markdownToPlain(md).utf8))
+    } else {
+        FileHandle.standardOutput.write(markdownToRTF(md).data)
+    }
+}
+
 func cmdWrite(_ a: Args) {
     let rtfBody = readBodyRTF(a)
     let body = rtfBody?.plain ?? (readBody(a) ?? "")
