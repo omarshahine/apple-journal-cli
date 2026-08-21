@@ -214,7 +214,7 @@ engine uploads them all to CloudKit — including the attachment files — and a
 delete/restore round trip propagates. The read pipeline has been swept over an
 entire real store: every entry row and all ~700 asset metadata blobs parse.
 
-The test suite (`tests/test_write.sh`, 143 assertions) runs the whole command
+The test suite (`tests/test_write.sh`, 146 assertions) runs the whole command
 surface against a disposable copy of a store — argument guards, insert
 bookkeeping, RTF round-trips, location metadata, media file layout, Live Photo
 pairing, Photos linkage, journal targeting, link assets, the delete/restore
