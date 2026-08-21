@@ -106,6 +106,9 @@ journal-cli write --live --journal "Test Journal" --body "..."
 journal-cli edit 103 --live --journal "Test Journal"  # move an entry
 
 journal-cli delete 103 --live          # soft delete; the deletion syncs
+journal-cli deleted                    # list Recently Deleted
+journal-cli restore 103 --live         # bring one back (the restore syncs)
+journal-cli empty --live               # purge never-synced deleted entries
 journal-cli delete 103 --live --hard   # ONLY for never-synced entries (see below)
 ```
 
@@ -190,6 +193,7 @@ Journal stores twelve asset types. This tool writes three:
 | `livePhoto` | 89 | read + write |
 | `multiPinMap` (location) | 85 | read + write |
 | `video` | 31 | read + write |
+| `audio` | 1 | read (incl. transcript) |
 | `stateOfMind` | 6 | read metadata only |
 | `workoutRoute` | 3 | read metadata only |
 | `workoutIcon` | 3 | read metadata only |
@@ -199,26 +203,53 @@ Journal stores twelve asset types. This tool writes three:
 | `drawing` | 1 | read metadata only |
 
 "read metadata only" means `show`/`export` report the asset's type and any
-attached files, but do not decode its type-specific payload and cannot create one.
+attached files, but cannot create one. Audio assets decode further than that:
+`show` prints the duration and the full speech transcript Journal stores in
+the asset metadata (word-level segments, joined). Drawings surface any
+handwriting-recognition text (`indexableContent`); the stroke data itself is a
+base64 `PKDrawing` blob that is not rendered.
 
 Beyond assets:
 
-- **Text edits are blocked on CRDT entries by default.** Journal keeps a second
-  copy of the entry text in a `ZMERGEABLEATTRIBUTES` CRDT blob (magic `crdt`, a
-  protobuf) for merge-safe multi-device editing. Roughly half a real library has
-  one. `edit` refuses to rewrite `ZTEXT` on those entries unless you pass
-  `--force`, since the CRDT copy may win on sync. Location, media, date and
-  bookmark edits are unaffected — none of them live in the CRDT.
-- **Written entries have no CRDT.** They carry `ZTEXT` only. Journal renders and
-  syncs them fine and does not backfill one, but concurrent edits on two devices
-  may not merge the way a natively-created entry would.
-- **No Recently Deleted restore/empty.** `delete` without `--hard` moves an
-  entry there (and the deletion syncs); there is no restore command yet.
+- **Text edits on app-authored entries are guarded — the CRDT limitation.**
+  See the section below.
 - **No audio.** Journal can record audio entries; this cannot.
 - **No reflection prompts.** `ZPROMPT` / `ZREFLECTIONPROMPT` are read-only
   curiosities here.
 - **Search is a client-side substring match** over title and body. It is not
   Journal's own index, does not rank, and does not search asset metadata.
+
+### The CRDT limitation
+
+A CRDT (Conflict-free Replicated Data Type) is a data structure built so that
+several devices can edit the same content offline and still merge to an
+identical result, with no server picking winners. Instead of storing "the
+string", a text CRDT stores every character with an identity and causal
+history ("character *x*, inserted after character 17, at logical time 43"), so
+two devices replaying each other's operations always converge. It is the
+technology behind conflict-free sync in Notes, and Journal uses one too.
+
+Journal keeps that CRDT in `ZMERGEABLEATTRIBUTES` (magic `crdt`, a protobuf).
+It is a second, richer copy of the entry text alongside the plain RTF in
+`ZTEXT`. Roughly half of a real library's entries have one — every entry whose
+text was typed in the app.
+
+Consequences for this tool:
+
+- **`edit` refuses to rewrite text on CRDT-bearing entries** unless `--force`
+  is passed. Rewriting only `ZTEXT` leaves the CRDT holding the old text with
+  all of its authoritative history, and the merge machinery can treat the edit
+  as stale — reverting or duplicating it on sync. Location, media, links, date,
+  bookmark and journal moves are all safe on any entry: none of that state
+  lives in the CRDT (verified: no place name or coordinate appears in any of
+  the 46 CRDT blobs in the sample library).
+- **Entries written by this tool have no CRDT** — `ZTEXT` only. Journal
+  renders and syncs them fine and does not backfill one, but a simultaneous
+  edit of the same entry on two devices may not merge the way an app-authored
+  entry would.
+- **Authoring the CRDT is out of scope.** It would mean reverse-engineering
+  the operation-log protobuf and fabricating causal history; getting it wrong
+  corrupts multi-device merging for that entry.
 
 ### Known limits on what is supported
 
@@ -246,7 +277,7 @@ tests/test_write.sh                                   # seeds from the live stor
 JOURNAL_SEED=~/Backups/journal-cli/<ts>/moments.sqlite tests/test_write.sh
 ```
 
-102 assertions against a throwaway copy: argument guards, insert bookkeeping,
+110 assertions against a throwaway copy: argument guards, insert bookkeeping,
 RTF round-trip, location metadata and coordinates, photo/video asset rows,
 attachment file layout on disk, asset ordering, Markdown export of media and
 locations, every `edit` operation (including media removal) and its CRDT guard, image

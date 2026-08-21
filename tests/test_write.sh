@@ -279,6 +279,25 @@ if [ -n "$SOFTPK" ]; then
   ok "soft delete marks unsynced" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$SOFTPK;")" "0"
 fi
 
+echo "T15 recently deleted lifecycle"
+LOUT2=$("$CLI" --db "$DB" write --body "To be deleted and restored." 2>&1)
+LPK2=$(echo "$LOUT2" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+"$CLI" --db "$DB" delete $LPK2 >/dev/null 2>&1
+ok "listed in deleted" "$("$CLI" --db "$DB" deleted --json | jq_ 'sum(1 for e in d if e["id"]=='$LPK2')')" "1"
+"$CLI" --db "$DB" restore $LPK2 >/dev/null 2>&1
+ok "restore clears flag" "$(sqlite3 "$DB" "select coalesce(ZRECENTLYDELETED,0) from ZJOURNALENTRYMO where Z_PK=$LPK2;")" "0"
+ok "restore marks unsynced" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$LPK2;")" "0"
+ok "restored entry searchable" "$("$CLI" --db "$DB" search 'deleted and restored' --json | jq_ 'len(d)')" "1"
+"$CLI" --db "$DB" restore $LPK2 >/dev/null 2>&1
+ok "restore of non-deleted rejected" "$?" "1"
+"$CLI" --db "$DB" delete $LPK2 >/dev/null 2>&1
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$LPK2;"
+EOUT2=$("$CLI" --db "$DB" empty 2>&1)
+ok "empty skips synced" "$(echo "$EOUT2" | grep -cE 'Skipped [0-9]+ synced')" "1"
+ok "synced row survived empty" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO where Z_PK=$LPK2;")" "1"
+"$CLI" --db "$DB" empty --force >/dev/null 2>&1
+ok "empty --force purges" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO where Z_PK=$LPK2;")" "0"
+
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"
 SEEDCOUNT=$(sqlite3 "${JOURNAL_SEED:-$DB}" 'select count(*) from ZJOURNALENTRYMO;' 2>/dev/null)

@@ -359,6 +359,14 @@ def assets_for(conn, pk):
                             "lat": v.get("latitude"), "lon": v.get("longitude")}
                            for v in visits
                            if isinstance(v, dict) and v.get("latitude") is not None]
+        elif r["ZASSETTYPE"] == "audio":
+            if m.get("duration") is not None: a["duration"] = m["duration"]
+            segs = m.get("transcriptSegments") or []
+            words = [x.get("text","") for x in segs if isinstance(x, dict)]
+            if words: a["transcript"] = " ".join(w for w in words if w)
+        elif r["ZASSETTYPE"] == "drawing":
+            ic = (m.get("indexableContent") or "").strip()
+            if ic: a["drawing_text"] = ic
         elif r["ZASSETTYPE"] == "link":
             url, title = decode_link_payload(m)
             if url: a["url"] = url
@@ -421,6 +429,12 @@ def cmd_show(a):
     print()
     print(e["text"] or "(no text)")
     for asset in e["assets"]:
+        if asset.get("transcript") is not None or asset.get("duration") is not None:
+            dur = f"{asset['duration']:.1f}s" if asset.get("duration") else ""
+            tr = f'  "{asset["transcript"]}"' if asset.get("transcript") else ""
+            print(f"\naudio (asset {asset['id']})  {dur}{tr}")
+        if asset.get("drawing_text"):
+            print(f"\ndrawing (asset {asset['id']})  text: {asset['drawing_text']}")
         if asset.get("url"):
             t = f"  {asset['link_title']}" if asset.get("link_title") else ""
             print(f"\nlink (asset {asset['id']})  {asset['url']}{t}")
@@ -902,6 +916,74 @@ def cmd_delete(a):
             what = "marked deleted (Recently Deleted); deletion will sync"
     print(f"Entry {a.id} {what}.")
 
+def cmd_deleted(a):
+    with Snapshot() as c:
+        rows = c.execute("""select Z_PK, ZID, ZENTRYDATE, ZRECENTLYDELETEDENTRYDATE,
+                                   ZISUPLOADEDTOCLOUD, ZTITLE, ZTEXT
+                            from ZJOURNALENTRYMO
+                            where coalesce(ZRECENTLYDELETED,0)=1
+                              and coalesce(ZISFULLYREMOVED,0)=0
+                            order by ZRECENTLYDELETEDENTRYDATE desc""").fetchall()
+        titles = rtf_batch([r["ZTITLE"] for r in rows])
+        texts  = rtf_batch([r["ZTEXT"] for r in rows])
+    out = []
+    for r, ti, tx in zip(rows, titles, texts):
+        dt = (datetime.datetime.fromtimestamp(r["ZENTRYDATE"] + EPOCH)
+              .isoformat(sep=" ", timespec="seconds")) if r["ZENTRYDATE"] else None
+        dd = (datetime.datetime.fromtimestamp(r["ZRECENTLYDELETEDENTRYDATE"] + EPOCH)
+              .isoformat(sep=" ", timespec="seconds")) if r["ZRECENTLYDELETEDENTRYDATE"] else None
+        out.append({"id": r["Z_PK"], "date": dt, "deleted": dd,
+                    "title": ti, "text": tx, "synced": bool(r["ZISUPLOADEDTOCLOUD"])})
+    if a.json:
+        print(json.dumps(out, indent=2, ensure_ascii=False)); return
+    if not out:
+        print("Recently Deleted is empty."); return
+    for e in out:
+        head = e["title"] or (e["text"].split("\n")[0][:50] if e["text"] else "(empty)")
+        print(f"{e['id']:>5}  entry {str(e['date'])[:10]}  deleted {str(e['deleted'])[:16]}  {head}")
+    print(f"\n{len(out)} entr{'y' if len(out)==1 else 'ies'} in Recently Deleted."
+          "  restore <id> brings one back; they purge ~30 days after deletion.")
+
+def cmd_restore(a):
+    with Live(allow_live_default=a.live) as conn:
+        row = conn.execute("""select Z_PK, ZRECENTLYDELETED from ZJOURNALENTRYMO
+                              where Z_PK=?""", (a.id,)).fetchone()
+        if not row: die(f"no entry with id {a.id}")
+        if not row["ZRECENTLYDELETED"]:
+            die(f"entry {a.id} is not in Recently Deleted")
+        conn.execute("""update ZJOURNALENTRYMO
+                        set ZRECENTLYDELETED=0, ZRECENTLYDELETEDENTRYDATE=NULL,
+                            ZUPDATEDDATE=?, ZISUPLOADEDTOCLOUD=0
+                        where Z_PK=?""", (cd_now(), a.id))
+    print(f"Entry {a.id} restored; the restore will sync.")
+
+def cmd_empty(a):
+    with Live(allow_live_default=a.live) as conn:
+        rows = conn.execute("""select Z_PK, ZID, ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO
+                               where coalesce(ZRECENTLYDELETED,0)=1
+                                 and coalesce(ZISFULLYREMOVED,0)=0""").fetchall()
+        purged = skipped = 0
+        for r in rows:
+            if r["ZISUPLOADEDTOCLOUD"] and not a.force:
+                skipped += 1; continue
+            eu = u_str(r["ZID"])
+            for (apk,) in conn.execute("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?",
+                                       (r["Z_PK"],)):
+                conn.execute("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", (apk,))
+            conn.execute("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", (r["Z_PK"],))
+            conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (r["Z_PK"],))
+            conn.execute("delete from ZJOURNALENTRYMO where Z_PK=?", (r["Z_PK"],))
+            if eu:
+                d = os.path.join(attach_dir(), eu)
+                if os.path.isdir(d): shutil.rmtree(d, ignore_errors=True)
+            purged += 1
+    msg = f"Purged {purged} entr{'y' if purged==1 else 'ies'}."
+    if skipped:
+        msg += (f" Skipped {skipped} synced entr{'y' if skipped==1 else 'ies'}:"
+                " a local purge of synced entries resurrects them from iCloud."
+                " Empty Recently Deleted in Journal.app instead (or --force to purge anyway).")
+    print(msg)
+
 def cmd_sandbox(a):
     """Seed a throwaway store. --from lets tests run off a backup without FDA."""
     src = os.path.expanduser(a.source) if a.source else DEFAULT_DB
@@ -1008,6 +1090,18 @@ def main():
                     help="edit text even when the entry has a CRDT copy")
     ed.add_argument("--live", action="store_true")
     ed.set_defaults(func=cmd_edit)
+
+    dl = sub.add_parser("deleted", help="list Recently Deleted entries")
+    dl.add_argument("--json", action="store_true"); dl.set_defaults(func=cmd_deleted)
+
+    rs = sub.add_parser("restore", help="restore an entry from Recently Deleted")
+    rs.add_argument("id", type=int); rs.add_argument("--live", action="store_true")
+    rs.set_defaults(func=cmd_restore)
+
+    em = sub.add_parser("empty", help="purge Recently Deleted (never-synced entries only)")
+    em.add_argument("--force", action="store_true",
+                    help="also purge synced entries (they may resurrect from iCloud)")
+    em.add_argument("--live", action="store_true"); em.set_defaults(func=cmd_empty)
 
     d = sub.add_parser("delete"); d.add_argument("id", type=int)
     d.add_argument("--hard", action="store_true"); d.add_argument("--live", action="store_true")
