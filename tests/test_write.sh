@@ -390,6 +390,10 @@ if [ $? -eq 0 ]; then
   ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
   ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
   ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
+  ok "image syntax untouched"         "$(printf '![alt](https://e.com/i.png)' | "$CLI" render --plain)" '![alt](https://e.com/i.png)'
+  ok "real link still flattened"      "$(printf '[real](https://x.com)' | "$CLI" render --plain)" 'real (https://x.com)'
+  TOOUT=$("$CLI" --db "$DB" write --markdown --title 'Summary check' 2>&1)
+  ok "title-only summary not empty"   "$(printf '%s' "$TOOUT" | grep -c 'empty')" "0"
   ok "backslash before non-escapable" "$(printf 'C:\\Users\\omar' | "$CLI" render --plain)" 'C:\Users\omar'
   ok "unterminated code stays literal" "$(printf 'a `**x** b' | "$CLI" render --plain)" 'a `**x** b'
   ok "unterminated code not bolded"   "$(printf 'a `**x** b' | "$CLI" render | grep -c 'Bold')" "0"

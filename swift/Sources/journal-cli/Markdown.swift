@@ -32,7 +32,9 @@ private let FENCE = rx("^[ \\t]*```")
 private let BULLET = rx("^[ \\t]{0,3}[-*+][ \\t]+(.*)$")
 private let ORDERED = rx("^[ \\t]{0,3}[0-9]{1,9}[.)][ \\t]+(.*)$")
 private let QUOTE = rx("^[ \\t]{0,3}>[ \\t]?(.*)$")
-private let LINK = rx("\\[([^\\]]*)\\]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
+// The negative lookbehind keeps image syntax out: "![alt](url)" is outside
+// this subset, so it survives as written rather than becoming "!alt (url)".
+private let LINK = rx("(?<!!)\\[([^\\]]*)\\]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
 private let TRIPLE_STAR = rx("\\*\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*\\*")
 private let TRIPLE_UNDER = rx("(?<![\\w_])___(?=\\S)(.+?)(?<=\\S)___(?![\\w_])")
 private let STRONG_STAR = rx("\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*")

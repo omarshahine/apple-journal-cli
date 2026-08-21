@@ -91,6 +91,7 @@ func cmdWrite(_ a: Args) {
 
     if a.has("--dry-run") {
         var bits: [String] = []
+        if hasTitle { bits.append("title") }
         if hasText { bits.append("\(body.count) chars") }
         if !media.isEmpty { bits.append("\(media.count) media") }
         if lp != nil { bits.append("1 live photo") }
@@ -188,6 +189,7 @@ func cmdWrite(_ a: Args) {
     }
 
     var bits: [String] = []
+    if hasTitle { bits.append("title") }
     if hasText { bits.append("\(body.count) chars") }
     if !media.isEmpty { bits.append("\(media.count) media") }
     if lp != nil { bits.append("1 live photo") }
