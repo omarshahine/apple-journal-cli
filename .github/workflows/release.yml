@@ -7,48 +7,136 @@ on:
 
 permissions:
   contents: write
+  id-token: write # npm OIDC trusted publishing
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# One sequential pipeline (spotmoji-style): validate -> test -> build ->
+# GitHub Release -> Homebrew tap -> npm. Re-runs are idempotent: release
+# uploads use --clobber and the tap bump no-ops when already current.
+#
+# Secrets: HOMEBREW_TAP_TOKEN (fine-grained PAT for omarshahine/homebrew-tap,
+# Contents: read & write). npm publishes via OIDC trusted publishing once the
+# package exists and this repo/workflow is configured as its trusted publisher
+# on npmjs.com; until then the npm step warns and skips.
 jobs:
   release:
-    name: Build universal binary + GitHub Release
+    name: Test, build, and publish
     runs-on: macos-15
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout
+      - name: Check out journal-cli
         uses: actions/checkout@v4
 
-      - name: Assert tag matches npm package version
+      - name: Validate release tag
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PKG_VERSION=$(node -p "require('./npm/package.json').version")
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Tag $TAG_VERSION does not match npm/package.json version $PKG_VERSION"
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must look like v1.2.3" >&2
             exit 1
           fi
+          PKG_VERSION=$(node -p "require('./npm/package.json').version")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $VERSION does not match npm/package.json version $PKG_VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ARCHIVE=journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" >> "$GITHUB_ENV"
 
       - name: Build universal binary
         run: swift build -c release --arch arm64 --arch x86_64
         working-directory: swift
 
-      - name: Run test suite against the release binary
+      - name: Test the release binary
         env:
           JOURNAL_CLI: ${{ github.workspace }}/swift/.build/apple/Products/Release/journal-cli
         run: |
+          set -euo pipefail
           DB=$(tests/make-fixture.sh "$RUNNER_TEMP/fixture")
           JOURNAL_SEED="$DB" tests/test_write.sh
 
       - name: Package binary
         run: |
+          set -euo pipefail
           BIN=swift/.build/apple/Products/Release/journal-cli
           file "$BIN"
-          tar czf "journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" -C "$(dirname "$BIN")" journal-cli
-          shasum -a 256 "journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" | tee checksums.txt
+          tar czf "$ARCHIVE" -C "$(dirname "$BIN")" journal-cli
+          shasum -a 256 "$ARCHIVE" | tee checksums.txt
 
-      - name: Create GitHub Release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "journal-cli $GITHUB_REF_NAME" \
-            --generate-notes \
-            "journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" \
-            checksums.txt
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" checksums.txt \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ARCHIVE" checksums.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --generate-notes \
+              --title "journal-cli $GITHUB_REF_NAME"
+          fi
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: omarshahine/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Homebrew formula
+        run: |
+          set -euo pipefail
+          TARBALL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          # Retry to absorb the brief delay before GitHub serves a fresh tag tarball.
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$TARBALL" -o source.tar.gz; then break; fi
+            echo "Attempt $attempt failed; retrying in 10s..."
+            sleep 10
+          done
+          SHA256=$(shasum -a 256 source.tar.gz | awk '{print $1}')
+
+          FILE=homebrew-tap/Formula/journal-cli.rb
+          perl -0pi -e "s{url \"https://github.com/${GITHUB_REPOSITORY//\//\\/}/archive/refs/tags/v[^\"]+\.tar\.gz\"}{url \"$TARBALL\"}" "$FILE"
+          perl -0pi -e "s{^(\s*)sha256 \"[0-9a-f]{64}\"}{\${1}sha256 \"$SHA256\"}m" "$FILE"
+          brew style "$FILE"
+          grep -nE 'url |sha256 ' "$FILE" | head -4
+
+      - name: Push Homebrew formula
+        run: |
+          set -euo pipefail
+          git -C homebrew-tap config user.name  "github-actions[bot]"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Formula/journal-cli.rb
+          if git -C homebrew-tap diff --cached --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+          git -C homebrew-tap commit -m "journal-cli: update to v${VERSION}"
+          git -C homebrew-tap push
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish to npm (OIDC trusted publishing)
+        run: |
+          set -euo pipefail
+          # First-time publish cannot use OIDC: the package must exist with this
+          # repo configured as its trusted publisher on npmjs.com. Until then,
+          # warn and skip so the rest of the release stays green.
+          if ! npm view apple-journal-cli version >/dev/null 2>&1; then
+            echo "::warning::apple-journal-cli does not exist on npm yet. Do the one-time first publish (npm login; cd npm && npm publish --access public), configure this repo as a trusted publisher on npmjs.com, and future tags will publish automatically."
+            exit 0
+          fi
+          cd npm
+          npm publish --provenance --access public
+          npm view apple-journal-cli version
