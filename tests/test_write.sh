@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Sandbox write tests. Never touches the real Journal store.
 set -uo pipefail
-CLI="$(cd "$(dirname "$0")/.." && pwd)/journal-cli"
+# JOURNAL_CLI overrides which binary is under test. Default: the Swift release
+# build if present, else the Python reference implementation.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "${JOURNAL_CLI:-}" ]; then CLI="$JOURNAL_CLI"
+elif [ -x "$ROOT/swift/.build/release/journal-cli" ]; then CLI="$ROOT/swift/.build/release/journal-cli"
+else CLI="$ROOT/reference/journal-cli.py"; fi
+echo "testing: $CLI"
 SB=$(mktemp -d /tmp/journal-sandbox.XXXXXX)
 # Seed from $JOURNAL_SEED if given (a backup), else the live store.
 if [ -n "${JOURNAL_SEED:-}" ]; then

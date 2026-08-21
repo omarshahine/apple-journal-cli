@@ -1,223 +1,190 @@
 # journal-cli
 
-Read and write Apple Journal entries from the terminal, straight from the app's
-own Core Data store.
+**Read and write Apple Journal entries from the terminal.** Text, photos,
+videos, Live Photos, web links, location pins, bookmarks, multiple journals —
+plus search, Markdown/JSON export, and audio transcripts. Native Swift, zero
+dependencies, macOS 14+.
 
-## Why this exists
+Apple Journal has no public API, no AppleScript dictionary, and no export
+format worth scripting against. journal-cli talks directly to the app's own
+data store, safely: reads never touch the live database, writes are guarded,
+backed up, and verified against Journal's sync engine.
 
-Journal has no public SDK, no AppleScript dictionary, and no export format worth
-scripting against. Every tool on GitHub works from the app's HTML export zip.
+```
+$ journal-cli list --limit 3
+   117  2026-08-21 00:43:01  Test new features
+   116  2026-08-21 00:32:11  link test
+   115  2026-08-20 22:16:40  test journal routing
 
-But the entries are sitting in a plain SQLite database:
+$ journal-cli show 117
+audio (asset 705)  2.2s  "This is a test of an audio recording."
+location  15835 NE 36th St, Redmond  (47.641544, -122.129299)
+```
+
+## Install
+
+```sh
+brew install omarshahine/tap/journal-cli
+# or
+npm install -g apple-journal-cli
+# or from source
+git clone https://github.com/omarshahine/journal-cli && cd journal-cli/swift
+swift build -c release && cp .build/release/journal-cli /usr/local/bin/
+```
+
+Grant **Full Disk Access** to your terminal (System Settings → Privacy &
+Security), then:
+
+```sh
+journal-cli doctor
+```
+
+## Reading
+
+Reads run against a temp snapshot of the store, so they are safe while
+Journal.app is open and never lock the live database.
+
+```sh
+journal-cli list --limit 20 --full            # --full prints bodies
+journal-cli list --since 2025-01-01 --until 2025-12-31
+journal-cli show 95                           # entry + assets + attachment paths
+journal-cli search anguilla
+journal-cli export --dir ~/journal-export     # one .md per entry, YAML frontmatter
+journal-cli export --dir ~/export --format json
+journal-cli stats                             # counts, words, by-year histogram
+journal-cli journals                          # list journals
+journal-cli deleted                           # list Recently Deleted
+```
+
+`show` decodes everything Journal stores: entry text, titles, bookmark state,
+photo/video attachment paths, location pins with place names, web links with
+titles, **audio transcripts** (word-level, joined), and handwriting-recognition
+text from drawings.
+
+## Writing
+
+Writes against the real store require `--live`, refuse to run while
+Journal.app is open, and take a timestamped backup to `~/Backups/journal-cli/`
+first. New entries sync to iCloud like native ones — verified end to end,
+including CloudKit accepting attached files.
+
+```sh
+# text, dated, bookmarked
+journal-cli write --live --title "Monday" --body "Long run, then coffee." \
+    --date 2026-08-01 --bookmark
+
+# photos and video (images auto-downscale to Journal's own ~6MP cap)
+journal-cli write --live --body "Beach day" --media a.heic b.mov
+
+# a Live Photo is an image + video pair
+journal-cli write --live --body "Golden hour" --live-photo IMG_0123.heic IMG_0123.mov
+
+# location pin
+journal-cli write --live --body "At the office" \
+    --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle
+
+# web link (renders as a rich link card)
+journal-cli write --live --body "Read this" --link https://example.com --link-title "A Post"
+
+# target a journal; link photos back to the Photos library
+journal-cli write --live --journal "Travel" --body "..." --media IMG_0079.JPG --photos-link
+```
+
+### Editing
+
+```sh
+journal-cli edit 103 --live --body "Rewritten." --title "New title"
+journal-cli edit 103 --live --lat 47.6 --lon -122.3 --place Home   # set/replace pin
+journal-cli edit 103 --live --add-media c.heic --add-link https://example.org
+journal-cli edit 103 --live --remove-media 700                     # ids shown by `show`
+journal-cli edit 103 --live --clear-location --no-bookmark
+journal-cli edit 103 --live --journal "Travel"                     # move journals
+```
+
+### Deleting
+
+```sh
+journal-cli delete 103 --live          # soft delete -> Recently Deleted; syncs
+journal-cli restore 103 --live         # bring it back; syncs
+journal-cli empty --live               # purge never-synced deleted entries
+journal-cli delete 103 --live --hard   # full row+file removal (guarded, see below)
+```
+
+## Agent-friendly by design
+
+journal-cli is built to be driven by AI agents and scripts as much as by
+humans:
+
+- **`--json` on every read command** — stable keys, machine-parseable, no
+  ANSI. `list`, `show`, `search`, `journals`, `deleted` all speak JSON.
+- **Meaningful exit codes** — `0` success, `1` refusal or error, with a
+  one-line reason on stderr prefixed `journal-cli:`.
+- **`--help` / `doctor`** — full usage from the binary itself;
+  `doctor` reports access state and entry count, exit 1 when setup is needed.
+- **Guardrails an agent cannot stumble past** — destructive or risky paths
+  (`--live`, `--force`, `--hard`) must be opted into explicitly, and every
+  live write auto-backs-up first.
+- **Sandboxing as a first-class command** — `sandbox --dir D [--from BACKUP]`
+  hands back a disposable copy of the store; every other command accepts
+  `--db` (or `$JOURNAL_DB`) to target it. Agents can rehearse a write with
+  zero risk, then replay it `--live`.
+- **A skill ships in-repo** — `skills/journal-cli/SKILL.md` teaches
+  Claude-style agents the command surface, the safety model, and the sharp
+  edges.
+
+## Safety model
+
+| Layer | Behavior |
+|---|---|
+| Reads | temp snapshot of `db`+`-wal`+`-shm`; live store never opened for read |
+| `--live` gate | writes to the real store refuse to run without it |
+| App check | writes refuse to run while Journal.app is open |
+| Auto-backup | every live write snapshots the store to `~/Backups/journal-cli/` first |
+| Synced hard-deletes | refused without `--force`: a local row delete does not tombstone the CloudKit record, and the entry **resurrects on the next sync** (observed). Soft delete syncs properly. |
+| CRDT text guard | text edits on app-authored entries are refused without `--force` (see below) |
+| Sandbox | `sandbox` + `--db` target a throwaway copy; the `--live` gate does not apply there |
+
+## Verified behavior
+
+Every write path has been verified against a real library on macOS 26:
+Journal.app renders CLI-written text, photos, Live Photos (labeled as such),
+link cards, and location pins (which also feed its Places index); the sync
+engine uploads them all to CloudKit — including the attachment files — and a
+delete/restore round trip propagates. The read pipeline has been swept over an
+entire real store: every entry row and all ~700 asset metadata blobs parse.
+
+The test suite (`tests/test_write.sh`, 110 assertions) runs the whole command
+surface against a disposable copy of a store — argument guards, insert
+bookkeeping, RTF round-trips, location metadata, media file layout, Live Photo
+pairing, Photos linkage, journal targeting, link assets, the delete/restore
+lifecycle, and `PRAGMA integrity_check`. Point `JOURNAL_SEED` at a backup to
+run it without Full Disk Access. `JOURNAL_CLI` selects the binary under test;
+the Python reference implementation in `reference/` passes the identical
+suite.
+
+## How it works
+
+Journal's store is a Core Data SQLite database:
 
 ```
 ~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite
 ```
 
 "moments" is Journal's internal codename, which is why searching for "journal"
-never finds it. Entry bodies are **plain RTF** in `ZJOURNALENTRYMO.ZTEXT` — not
-encrypted. The encrypted CloudKit records in
-`~/Library/Containers/com.apple.journal/Data/CloudKit/` are just the sync cache
-sitting next to the real data.
+never finds it. Entry text is plain RTF in `ZJOURNALENTRYMO.ZTEXT` — not
+encrypted. (The encrypted CloudKit records under the app container are only
+the sync cache.)
 
-Requires **Full Disk Access** for your terminal.
-
-## Install
-
-```sh
-ln -s "$PWD/journal-cli" ~/.local/bin/journal-cli
-journal-cli doctor
-```
-
-## Reading
-
-Reads run against a temp snapshot of `db` + `-wal` + `-shm`, so the live store is
-never locked or modified. Safe to run while Journal is open.
-
-```sh
-journal-cli list                                      # newest first
-journal-cli list --limit 20 --full                    # --full prints bodies
-journal-cli list --since 2025-01-01 --until 2025-12-31
-journal-cli list --include-empty                      # photo-only entries too
-journal-cli show 95                                   # one entry + attachments
-journal-cli search anguilla --full
-journal-cli export --dir ~/journal-export             # one .md per entry
-journal-cli export --dir ~/journal-export --format json
-journal-cli stats
-journal-cli doctor                                    # check access
-```
-
-Every read command takes `--json` for scripting. `list` and `search` also take
-`--limit N` and `--full`.
-
-`show` resolves attachment paths to real files under `Library/Attachments/`.
-
-List markers: `*` bookmarked, `+` not yet synced to iCloud, ` ` normal.
-
-## Writing
-
-Writing is opt-in and guarded. Against the real store, `journal-cli`:
-
-1. refuses to run without `--live`
-2. refuses to run while Journal.app is open
-3. takes a timestamped backup to `~/Backups/journal-cli/` first
-
-```sh
-# text
-journal-cli write --live --title "Monday" --body "Long run, then coffee."
-cat notes.md | journal-cli write --live --title "Notes"
-
-# photos and video (images are downscaled to Journal's own ~6MP cap; --no-resize to skip)
-journal-cli write --live --body "Beach day" --media ~/Pictures/a.heic ~/Movies/b.mov
-
-# a Live Photo is an image + video pair
-journal-cli write --live --body "Golden hour" --live-photo IMG_0123.heic IMG_0123.mov
-
-# link media back to the Photos library (writes assetIdentifier via Photos.sqlite lookup)
-journal-cli write --live --body "..." --media IMG_0079.JPG --photos-link
-
-# attach a web link (rendered as a rich link card)
-journal-cli write --live --body "Read this" --link https://example.com/post --link-title "A Post"
-journal-cli edit 103 --live --add-link https://example.com/other
-
-# location pin
-journal-cli write --live --body "At the office" \
-    --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle
-
-# everything at once, backdated and bookmarked
-journal-cli write --live --title "Waikiki" --body "..." \
-    --media ~/Pictures/surf.heic --lat 21.2793 --lon -157.8294 \
-    --place Waikiki --date 2026-08-01 --bookmark
-
-journal-cli write --live --title "Notes" --body-file notes.txt
-
-# edit an existing entry
-journal-cli edit 103 --live --body "Rewritten." --title "New title"
-journal-cli edit 103 --live --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle
-journal-cli edit 103 --live --add-media ~/Pictures/b.heic
-journal-cli edit 103 --live --clear-location
-journal-cli edit 103 --live --remove-media 700        # asset ids shown by `show 103`
-journal-cli edit 103 --live --remove-all-media
-journal-cli edit 103 --live --date 2024-03-05 --bookmark   # or --no-bookmark
-
-# target a journal (default: the app's default journal)
-journal-cli journals                                  # list journals
-journal-cli write --live --journal "Test Journal" --body "..."
-journal-cli edit 103 --live --journal "Test Journal"  # move an entry
-
-journal-cli delete 103 --live          # soft delete; the deletion syncs
-journal-cli deleted                    # list Recently Deleted
-journal-cli restore 103 --live         # bring one back (the restore syncs)
-journal-cli empty --live               # purge never-synced deleted entries
-journal-cli delete 103 --live --hard   # ONLY for never-synced entries (see below)
-```
-
-To rehearse anything without risk, work against a throwaway copy:
-
-```sh
-DB=$(journal-cli sandbox --dir /tmp/jtest)            # seed from the live store
-DB=$(journal-cli sandbox --dir /tmp/jtest --from ~/Backups/journal-cli/<ts>/moments.sqlite)
-journal-cli --db "$DB" write --body "no --live needed here"
-journal-cli --db "$DB" list --limit 3
-```
-
-`--db` (or `$JOURNAL_DB`) points any command at another store. Anything that is
-not the real Journal store skips the `--live` guard, and attachments are read
-and written beside that database rather than in your real `Attachments/`.
-
-### How writes are constructed
-
-| Field | Storage |
+| Data | Storage |
 |---|---|
-| body / title | RTF blob in `ZTEXT` / `ZTITLE` via `textutil` |
-| date | `ZENTRYDATE` + `ZMOMENTDATEFORSORTING`, Core Data epoch |
-| bookmark | `ZFLAGGED` (verified: Journal shows the Bookmarked badge) |
-| photo / video | `ZJOURNALENTRYASSETMO` type `photo`/`video`, source `imagePicker`, plus a `ZJOURNALENTRYASSETFILEATTACHMENTMO` row |
-| location | `ZJOURNALENTRYASSETMO` type `multiPinMap`, source `locationPicker`, `ZISSLIM=1` |
-| web link | `ZJOURNALENTRYASSETMO` type `link`, source `shareSheet`; metadata `data` is a base64 `NSKeyedArchiver`-archived `LPLinkMetadata` (built via a Swift helper, needs the `swift` CLI) |
-| asset order | `ZASSETORDERING`, plain JSON `[assetUUID, index, ...]` |
-
-Asset metadata (`ZASSETMETADATA`) is **one version byte `0x01` followed by
-JSON**; a `0x02` version byte instead carries a bare UUID reference into
-`.moments_SUPPORT/_EXTERNAL_DATA/` — Core Data external storage for oversized
-payloads (drawings, workout routes, links with cached preview images). The
-reader follows those refs; written links stay inline since a fresh
-`LPLinkMetadata` without images is under 1 KB.
-For a location that is `{"revision":2,"visitsData":[{latitude, longitude,
-placeName, city, visitStartTime, ...}]}`. For a photo it carries `latitude`,
-`longitude`, `placeName`, crop rects and `date`.
-
-Media files are copied to:
-
-```
-Attachments/<entry-UUID>/<asset-UUID>/<random-UUID>_resized.<ext>
-```
-
-with `fileAttachment.ZPARENTID = asset.ZID` and `asset.ZPARENTID = entry.ZID`.
-
-New rows get `ZISUPLOADEDTOCLOUD=0` so Journal's sync engine treats them as new
-local content.
-
-### Verified behaviour
-
-Text, photo and location writes have all been confirmed end to end on
-macOS 26.6.2 against a real library:
-
-1. `journal-cli write --live --media pic.jpg --lat .. --lon .. --place ..`
-   inserted an entry, a `photo` asset, a `multiPinMap` asset and a file
-   attachment, and copied the image into `Attachments/`.
-2. Journal.app rendered the entry natively — photo displayed full width, a
-   location chip reading "Space Needle · Seattle", title and body intact.
-3. The sidebar **Places** counter incremented (481 -> 483), so Journal ingested
-   the pin into its own location index rather than merely displaying it.
-4. Within ~60s every row synced: entry, both assets and the file attachment all
-   flipped `ZISUPLOADEDTOCLOUD` to `1` and received ~1,900-1,970 bytes of
-   `ZRECORDSYSTEMFIELDS`. CloudKit accepted the image upload too.
-5. `edit` was confirmed the same way: an entry created without a location had
-   its body rewritten and a pin added, and Journal showed both the new text and
-   a "Space Needle - Seattle" chip. The edit re-synced to CloudKit.
-6. A `--hard` delete removed the entry, its assets and the attachment
-   directory. It did not return across a Journal relaunch and resync.
-
-So Journal's sync engine fully adopts rows and files it did not create,
-provided the Core Data bookkeeping is right.
-
-### Not supported
-
-Journal stores twelve asset types. This tool writes three:
-
-| Asset type | Count in a real library | Support |
-|---|---|---|
-| `photo` | 267 | read + write |
-| `streakEvent` | 208 | read metadata only |
-| `livePhoto` | 89 | read + write |
-| `multiPinMap` (location) | 85 | read + write |
-| `video` | 31 | read + write |
-| `audio` | 1 | read (incl. transcript) |
-| `stateOfMind` | 6 | read metadata only |
-| `workoutRoute` | 3 | read metadata only |
-| `workoutIcon` | 3 | read metadata only |
-| `motionActivity` | 1 | read metadata only |
-| `link` | 1 | read + write |
-| `genericMap` | 1 | read only |
-| `drawing` | 1 | read metadata only |
-
-"read metadata only" means `show`/`export` report the asset's type and any
-attached files, but cannot create one. Audio assets decode further than that:
-`show` prints the duration and the full speech transcript Journal stores in
-the asset metadata (word-level segments, joined). Drawings surface any
-handwriting-recognition text (`indexableContent`); the stroke data itself is a
-base64 `PKDrawing` blob that is not rendered.
-
-Beyond assets:
-
-- **Text edits on app-authored entries are guarded — the CRDT limitation.**
-  See the section below.
-- **No audio.** Journal can record audio entries; this cannot.
-- **No reflection prompts.** `ZPROMPT` / `ZREFLECTIONPROMPT` are read-only
-  curiosities here.
-- **Search is a client-side substring match** over title and body. It is not
-  Journal's own index, does not rank, and does not search asset metadata.
+| entries | `ZJOURNALENTRYMO`; text/title as RTF blobs; Core Data epoch timestamps |
+| assets | `ZJOURNALENTRYASSETMO` — 12 types (photo, video, livePhoto, multiPinMap, link, audio, drawing, stateOfMind, streakEvent, workoutRoute/Icon, motionActivity) |
+| files | `ZJOURNALENTRYASSETFILEATTACHMENTMO` → `Attachments/<entryUUID>/<assetUUID>/…` |
+| asset metadata | one version byte `0x01` + JSON; `0x02` + UUID = Core Data external storage in `.moments_SUPPORT/_EXTERNAL_DATA/` |
+| links | base64 `NSKeyedArchiver`-archived `LPLinkMetadata` inside the asset metadata |
+| audio | asset metadata carries duration, waveform, and a word-level transcript |
+| journals | `ZJOURNALMO` (names live in each journal's CRDT blob) + `Z_5JOURNALS` join |
+| new-row bookkeeping | fresh `Z_PK`, bumped `Z_PRIMARYKEY.Z_MAX`, 16-byte UUID `ZID`, `ZISUPLOADEDTOCLOUD=0` — Journal's sync engine adopts the row and uploads it |
 
 ### The CRDT limitation
 
@@ -225,86 +192,39 @@ A CRDT (Conflict-free Replicated Data Type) is a data structure built so that
 several devices can edit the same content offline and still merge to an
 identical result, with no server picking winners. Instead of storing "the
 string", a text CRDT stores every character with an identity and causal
-history ("character *x*, inserted after character 17, at logical time 43"), so
-two devices replaying each other's operations always converge. It is the
-technology behind conflict-free sync in Notes, and Journal uses one too.
+history, so two devices replaying each other's operations always converge.
 
-Journal keeps that CRDT in `ZMERGEABLEATTRIBUTES` (magic `crdt`, a protobuf).
-It is a second, richer copy of the entry text alongside the plain RTF in
-`ZTEXT`. Roughly half of a real library's entries have one — every entry whose
-text was typed in the app.
-
-Consequences for this tool:
+Journal keeps such a CRDT in `ZMERGEABLEATTRIBUTES` (magic `crdt`, a protobuf)
+— a second, richer copy of the entry text alongside the RTF, present on every
+entry whose text was typed in the app. Consequences:
 
 - **`edit` refuses to rewrite text on CRDT-bearing entries** unless `--force`
-  is passed. Rewriting only `ZTEXT` leaves the CRDT holding the old text with
-  all of its authoritative history, and the merge machinery can treat the edit
-  as stale — reverting or duplicating it on sync. Location, media, links, date,
-  bookmark and journal moves are all safe on any entry: none of that state
-  lives in the CRDT (verified: no place name or coordinate appears in any of
-  the 46 CRDT blobs in the sample library).
-- **Entries written by this tool have no CRDT** — `ZTEXT` only. Journal
-  renders and syncs them fine and does not backfill one, but a simultaneous
-  edit of the same entry on two devices may not merge the way an app-authored
+  is passed: rewriting only the RTF leaves the CRDT holding the old text with
+  authoritative history, and sync can revert or duplicate the edit. Location,
+  media, links, date, bookmark and journal moves are safe on any entry — none
+  of that state lives in the CRDT (verified across a real library).
+- **CLI-written entries have no CRDT.** Journal renders and syncs them fine,
+  but a simultaneous edit on two devices may not merge like an app-authored
   entry would.
-- **Authoring the CRDT is out of scope.** It would mean reverse-engineering
-  the operation-log protobuf and fabricating causal history; getting it wrong
-  corrupts multi-device merging for that entry.
+- **Authoring the CRDT is out of scope** — fabricating causal history in a
+  reverse-engineered protobuf risks corrupting merge for that entry.
 
-### Known limits on what is supported
+### Not supported
 
-- Images are downscaled to Journal's own ~6MP `_resized` cap (long edge 2830)
-  unless `--no-resize` is passed; Live Photo pairs are stored untouched, as
-  Journal does.
-- `--photos-link` resolves `assetIdentifier` by original filename (and size,
-  when the name is ambiguous) against `Photos.sqlite`, or from the UUID when
-  the file comes straight out of a `.photoslibrary`. Files Photos does not
-  know about are attached unlinked, with a warning.
-- **Hard-deleting a synced entry resurrects it.** Confirmed empirically: four
-  hard-deleted synced entries came back hours later with new Z_PKs — a local
-  row delete does not tombstone the CloudKit record, and sync re-creates the
-  entry. `delete --hard` therefore refuses synced entries unless `--force` is
-  passed. The safe paths are a soft delete (the CLI marks the flagged row
-  unsynced, Journal's engine uploads the deletion, and the entry lands in
-  Recently Deleted everywhere) or deleting in Journal.app.
-- Live writes need Full Disk Access, which macOS can revoke mid-session; see
-  Troubleshooting.
+- Creating system-generated assets: streaks, state of mind, workout data,
+  motion activity, drawings. Their metadata all decodes on read.
+- Writing audio entries (transcripts and duration are read).
+- Rendering `PKDrawing` stroke data.
+- Whether a purged CloudKit record is tombstoned on *other* devices has not
+  been verified from this machine.
 
-## Tests
+## Development
 
 ```sh
-tests/test_write.sh                                   # seeds from the live store
-JOURNAL_SEED=~/Backups/journal-cli/<ts>/moments.sqlite tests/test_write.sh
+cd swift && swift build            # debug build
+tests/test_write.sh                # full suite against a store copy
 ```
 
-110 assertions against a throwaway copy: argument guards, insert bookkeeping,
-RTF round-trip, location metadata and coordinates, photo/video asset rows,
-attachment file layout on disk, asset ordering, Markdown export of media and
-locations, every `edit` operation (including media removal) and its CRDT guard, image
-resizing, Live Photo pairing, Photos-library linkage, journal targeting and
-the journals listing, the synced hard-delete guard, soft and hard delete, `PRAGMA integrity_check`, and a check that the
-source store never moved.
-
-`JOURNAL_SEED` runs the whole suite off a backup, so tests need no Full Disk
-Access and never touch the real store.
-
-## Troubleshooting
-
-**`PERMISSION DENIED` on the store.** The group container is TCC-protected.
-Grant Full Disk Access to your terminal and relaunch it. Note that the grant can
-disappear mid-session; `journal-cli doctor` tells you the current state. Copies
-of the store made while access was granted keep working, so a backup is a usable
-fallback for reads and tests.
-
-## Schema notes
-
-| Table | Rows (example) | What |
-|---|---|---|
-| `ZJOURNALENTRYMO` | 101 | entries; `ZTEXT`/`ZTITLE` are RTF blobs |
-| `ZJOURNALENTRYASSETMO` | 691 | photos, audio, suggestions |
-| `ZJOURNALENTRYASSETFILEATTACHMENTMO` | 484 | files under `Library/Attachments/` |
-| `ZJOURNALMO` | 1 | the journal itself |
-| `Z_5JOURNALS` | 10 | entry↔journal join (sparse) |
-| `Z_PRIMARYKEY` | — | per-entity max PK; must be bumped on insert |
-
-Timestamps are Core Data reference dates: add `978307200` for unix epoch.
+The `reference/` directory holds the original Python implementation — same
+command surface, same test suite, useful for spelunking since it needs no
+build step.

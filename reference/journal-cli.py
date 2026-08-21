@@ -35,11 +35,14 @@ def attach_dir():
     """Attachments live beside the database, so sandboxes stay self-contained."""
     return os.path.join(os.path.dirname(os.path.abspath(DB)), "Attachments")
 
+# Journal stores entry dates as FLOATING wall-clock time encoded as UTC: an
+# entry made at 11:51 local is stored so UTC-formatting yields 11:51. Encode
+# local wall clock on write; format with UTC on read.
 def cd_now():
-    return datetime.datetime.now().timestamp() - EPOCH
+    return cd(datetime.datetime.now())
 
 def cd(dt):
-    return dt.timestamp() - EPOCH
+    return dt.timestamp() - dt.astimezone().utcoffset().total_seconds() * -1 - EPOCH if False else         dt.timestamp() + (dt.astimezone().utcoffset().total_seconds()) - EPOCH
 
 def uid():
     return str(uuid.uuid4()).upper()

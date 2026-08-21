@@ -1,0 +1,17 @@
+{
+  "name": "apple-journal-cli",
+  "version": "1.0.0",
+  "description": "Read and write Apple Journal entries from the terminal. Native Swift binary; macOS only.",
+  "keywords": ["apple", "journal", "journaling", "macos", "cli", "diary"],
+  "homepage": "https://github.com/omarshahine/journal-cli",
+  "repository": { "type": "git", "url": "git+https://github.com/omarshahine/journal-cli.git" },
+  "license": "MIT",
+  "author": "Omar Shahine",
+  "os": ["darwin"],
+  "cpu": ["arm64", "x64"],
+  "bin": { "journal-cli": "bin/journal-cli" },
+  "files": ["bin/journal-cli", "README.md"],
+  "scripts": {
+    "prepack": "cp ../README.md README.md && cp ../swift/.build/apple/Products/Release/journal-cli bin/journal-cli && chmod +x bin/journal-cli"
+  }
+}
