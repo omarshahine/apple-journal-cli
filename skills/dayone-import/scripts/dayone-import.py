@@ -42,7 +42,12 @@ def save_state(path, state):
 def gather(args):
     con = dayone.connect(args.db)
     j = dayone.resolve_journal(con, args.journal)
-    extra = [os.path.join(args.export, "photos")] if args.export else []
+    # Day One's export splits media by kind; search every one it writes, not
+    # just photos/, or a journal with video comes up short whenever the app
+    # has not also cached the originals locally.
+    extra = ([os.path.join(args.export, d)
+              for d in ("photos", "videos", "audios", "pdfs")]
+             if args.export else [])
     media = dayone.media_index(extra)
     entries = dayone.read_entries(con, j["pk"], media)
     return j, entries
