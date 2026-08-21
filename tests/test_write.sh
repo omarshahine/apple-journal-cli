@@ -230,34 +230,39 @@ echo "T12 journals"
 NJ=$(sqlite3 "$DB" "select count(*) from ZJOURNALMO where coalesce(ZUSERDELETED,0)=0;")
 if [ "$NJ" -ge 2 ]; then
   TJPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where ZMERGEABLEATTRIBUTES is not null limit 1;")
+  TJOPT=$(sqlite3 "$DB" "select Z_OPT from ZJOURNALMO where Z_PK=$TJPK;")
   ok "journals lists both" "$("$CLI" --db "$DB" journals --json | jq_ 'len(d)')" "$NJ"
   ok "name resolved from CRDT" "$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$TJPK'][0]["name"]')" "Test Journal"
   JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "Test Journal" 2>&1)
   JPK=$(echo "$JOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "join row written" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$JPK;")" "$TJPK"
-  ok "custom journal queued for sync" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
-  ok "custom journal version bumped" "$(sqlite3 "$DB" "select Z_OPT from ZJOURNALMO where Z_PK=$TJPK;")" "2"
+  ok "write warns membership is local staging" "$(echo "$JOUT" | grep -c 'Mac-local staging membership')" "1"
+  ok "staging write does not fake a journal upload" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
+  ok "staging write leaves journal version unchanged" "$(sqlite3 "$DB" "select Z_OPT from ZJOURNALMO where Z_PK=$TJPK;")" "$TJOPT"
   DOUT=$("$CLI" --db "$DB" write --body "In the default journal." 2>&1)
   DPK=$(echo "$DOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "default write has no join row" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  ok "default write has no staging warning" "$(echo "$DOUT" | grep -c 'Mac-local staging membership')" "0"
   sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
-  "$CLI" --db "$DB" edit $DPK --journal "Test Journal" >/dev/null 2>&1
-  ok "edit moves into journal" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "$TJPK"
-  ok "move queues destination journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
-  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
+  EOUT=$("$CLI" --db "$DB" edit $DPK --journal "Test Journal" 2>&1)
+  ok "edit stages an unsynced entry in journal" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "$TJPK"
+  ok "edit warns membership is local staging" "$(echo "$EOUT" | grep -c 'Mac-local staging membership')" "1"
+  ok "staged move does not fake a journal upload" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
   "$CLI" --db "$DB" edit $DPK --journal 1 >/dev/null 2>&1
   ok "edit moves back to default (join row dropped)" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
-  ok "move queues source journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
-  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
-  "$CLI" --db "$DB" sync-journals --dry-run >/dev/null 2>&1
-  ok "sync-journals dry-run is read-only" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
-  "$CLI" --db "$DB" sync-journals >/dev/null 2>&1
-  ok "sync-journals repairs existing memberships" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=X'01' where Z_PK=$DPK;"
+  "$CLI" --db "$DB" edit $DPK --journal "Test Journal" >/dev/null 2>&1
+  ok "direct journal move refused for CRDT entry" "$?" "1"
+  ok "refused CRDT move is unchanged" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=NULL where Z_PK=$DPK;"
+  AUDIT=$("$CLI" --db "$DB" sync-journals --journal "Test Journal" 2>&1)
+  ok "sync-journals finds local-only membership" "$(echo "$AUDIT" | grep -Ec 'Test Journal: [1-9][0-9]* entr(y|ies)')" "1"
+  ok "sync-journals gives native move instructions" "$(echo "$AUDIT" | grep -c 'Select Entries > Select All')" "1"
+  ok "sync-journals is read-only" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
   "$CLI" --db "$DB" write --body x --journal "No Such Journal" >/dev/null 2>&1
   ok "unknown journal rejected" "$?" "1"
-  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
   "$CLI" --db "$DB" delete $JPK --hard >/dev/null 2>&1
-  ok "hard delete queues former journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  ok "hard delete leaves journal sync state unchanged" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
   "$CLI" --db "$DB" delete $DPK --hard >/dev/null 2>&1
 else
   echo "  SKIP  (seed has one journal)"

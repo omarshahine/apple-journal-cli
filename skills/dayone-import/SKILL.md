@@ -86,20 +86,28 @@ journal-cli --db "$DB" journals --json      # verify counts, then spot-check
 
 Then replay the identical command without `--target-db`.
 
-Imports made with journal-cli 1.0.6 or earlier can look correctly categorized
-on the Mac while another device places every imported entry in the default
-Journal. Repair those existing memberships once with:
+`--into` is a staging journal on this Mac. Direct Core Data relationships do
+not create Journal's per-entry iCloud merge data, so they can look correct on
+the Mac while another device places every imported entry in the default
+Journal. Audit the staging journal with:
 
 ```sh
-journal-cli sync-journals --dry-run
-journal-cli sync-journals --live
+journal-cli sync-journals --journal "Day One - Photography"
 ```
 
-The repair queues the custom journal records for re-upload; it does not rewrite
-the imported entries or their media.
+Then use the required native finalization workflow:
 
-- **The target journal must already exist** in Journal.app — create it there
-  first (journal-cli cannot create journals).
+1. In Journal.app, create a new final journal with a different name, such as
+   `Photography`.
+2. Open the staging journal, choose **Select Entries**, then **Select All**.
+3. Choose **Move / Choose Journals** and select the new final journal.
+4. Wait until the staging journal shows 0 entries and iCloud finishes syncing.
+
+The native move creates the merge data that syncs membership to iPhone and
+other devices. `sync-journals` is a read-only audit and instruction command.
+
+- **The staging journal must already exist** in Journal.app. Give it a name
+  distinct from the final journal, for example `Day One - Photography`.
 - **Quit Journal.app** before a live run; `journal-cli` refuses while it runs.
 - **Resumable.** Progress is kept in `~/.local/state/dayone-import/<journal>.json`
   keyed by Day One UUID, so a re-run skips what already landed and never
@@ -213,9 +221,10 @@ Always `--dry-run` first; it prints every rename it intends to make.
 
 ## Sharp edges
 
-- **Confirm the target journal with the user before a live import.** Entries
-  land in a real, syncing journal; there is no bulk undo beyond
-  `journal-cli delete` per entry.
+- **Confirm the staging journal with the user before a live import.** Entries
+  land in the real store and sync, but the staging membership remains Mac-local
+  until the user completes the native finalization move. There is no bulk undo
+  beyond `journal-cli delete` per entry.
 - Photos are copied and resized into Journal's store and then **upload to
   iCloud**. Say roughly how much data that is before starting.
 - Day One may be mid-sync; its entry counts can move between runs. Re-run

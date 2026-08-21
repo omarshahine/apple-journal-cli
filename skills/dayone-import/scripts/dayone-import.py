@@ -205,7 +205,12 @@ def cmd_import(args):
 
     print("\nWrote %d, failed %d. State: %s" % (ok, fail, state_path))
     if not args.dry_run and live:
-        print("Launch Journal.app to let it sync the new entries to iCloud.")
+        print("\nThe entries are in Mac-local staging journal %r." % target)
+        print("To sync that journal membership to iPhone and other devices:")
+        print("  1. In Journal.app, create a new final journal with a different name.")
+        print("  2. Open %r, then choose Select Entries > Select All." % target)
+        print("  3. Choose Move / Choose Journals and select the new final journal.")
+        print("  4. Wait until %r shows 0 entries and iCloud finishes syncing." % target)
 
 
 # journal-cli snapshots the whole store before every live write; across a

@@ -34,8 +34,8 @@ WRITE (guarded: --live required against the real store; auto-backup first)
   delete    <id> [--hard] [--force] [--live]
   restore   <id> [--live]
   empty     [--force] [--live]
-  sync-journals [--journal NAME] [--live]
-            re-upload custom-journal memberships after a direct-store import
+  sync-journals [--journal NAME]
+            audit Mac-local memberships and print the native sync repair steps
   sandbox   --dir DIR [--from DB]      copy the store somewhere safe for testing
   render    [--body B | --body-file F | stdin] [--plain | --inline]
             render Markdown to RTF (or plain text) on stdout; writes nothing

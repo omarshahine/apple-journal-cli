@@ -47,9 +47,9 @@ journal-cli write --live --media a.heic b.mov          # photos auto-resize
 journal-cli write --live --live-photo IMG.heic IMG.mov # image+video pair
 journal-cli write --live --lat N --lon N --place P --city C
 journal-cli write --live --link URL --link-title T
-journal-cli write --live --journal "Name" ...          # non-default journal
+journal-cli write --live --journal "Name" ...          # Mac-local staging journal
 journal-cli edit <id> --live [same flags; --add-media/--add-link/--remove-media ID/--clear-location/--journal N]
-journal-cli sync-journals --live                       # repair pre-1.0.7 cross-device memberships
+journal-cli sync-journals --journal "Name"             # audit and show native finalization steps
 journal-cli delete <id> --live                         # soft; syncs properly
 journal-cli restore <id> --live
 ```
@@ -89,9 +89,11 @@ for anything experimental; replay with `--live` once it looks right.
   entries — it propagates.
 - If the user has a designated test journal, write there
   (`--journal "<name>"`); check `journal-cli journals --json` first.
-- If custom-journal entries look correct on the Mac but appear in the default
-  Journal on another device, run `sync-journals --dry-run` and then
-  `sync-journals --live`. This queues each custom journal record for re-upload;
-  it does not rewrite every entry.
+- `--journal` writes a Mac-local staging relationship. It does not construct
+  Journal's per-entry iCloud merge data. To sync membership to other devices,
+  run `sync-journals --journal "<staging name>"` and follow its native workflow:
+  create a differently named final journal in Journal.app, select all entries
+  in the staging journal, move them to the final journal, and wait for staging
+  to reach 0. The command is read-only.
 - Dates print in the machine's local timezone; a stale or invalid `TZ` env
   var in your shell will skew displayed times, not stored ones.
