@@ -8,7 +8,7 @@ DIR="${1:?usage: make-fixture.sh DIR}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$DIR"
 DB="$DIR/moments.sqlite"
-rm -f "$DB" 2>/dev/null || :
+if [ -e "$DB" ]; then /usr/bin/trash "$DB"; fi
 
 sqlite3 "$DB" < "$HERE/fixture-schema.sql"
 

@@ -122,6 +122,13 @@ def cmd_import(args):
     if args.limit:
         todo = todo[:args.limit]
 
+    # Probe once rather than discovering mid-migration: an older journal-cli
+    # rejects --markdown for every text entry while media-only entries still
+    # land, leaving a half-written journal and state file.
+    if _render(args.cli, "probe") is None:
+        die("%s does not support --markdown (needs journal-cli 1.1.0+)"
+            % args.cli)
+
     live = not args.target_db
     print("Day One '%s' -> Apple Journal '%s'" % (j["name"], target))
     print("%d to write, %d already done, %d empty/skipped%s"
@@ -380,7 +387,9 @@ def _stored(cli, target_db):
     text = {e["id"]: (e.get("title") or "", e.get("text") or "")
             for e in json.loads(r.stdout)}
 
-    db = target_db or os.path.expanduser(
+    # Must be the same store the `list` subprocess just read, or primary keys
+    # would be matched against a different database entirely.
+    db = target_db or os.environ.get("JOURNAL_DB") or os.path.expanduser(
         "~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite")
     rtf, rtf_ok = {}, True
     try:
@@ -398,6 +407,23 @@ def _stored(cli, target_db):
         sys.stderr.write("note: could not read entry RTF from %s; checking "
                          "visible text only.\n" % db)
     return ({pk: (t[0], t[1], rtf.get(pk)) for pk, t in text.items()}, rtf_ok)
+
+
+# Formatting controls that carry meaning, counted so two RTF documents can be
+# compared without tripping over serializer differences -- a macOS upgrade can
+# change the \cocoartf version or font-table order without changing a word.
+_FMT_CONTROLS = (
+    ("bold", re.compile(rb"\\b(?![0-9a-zA-Z])")),
+    ("italic", re.compile(rb"\\i(?![0-9a-zA-Z])")),
+    ("strike", re.compile(rb"\\strike(?![0-9a-zA-Z])")),
+    ("list", re.compile(rb"\\listtext")),
+)
+
+
+def _fmt_signature(rtf):
+    if rtf is None:
+        return None
+    return tuple(len(pat.findall(rtf)) for _name, pat in _FMT_CONTROLS)
 
 
 def _render(cli, md, plain=False):
@@ -447,21 +473,19 @@ def cmd_fix_text(args):
         body_md = e.get("body_md")
         if body_md is None:
             body_md = e["body"] or ""
-        if why is None and rtf_ok:
-            want = _render(args.cli, body_md)
-            want_plain = _render(args.cli, body_md, plain=True) or b""
-            if want is None:
-                pass
-            elif not want_plain.strip():
-                if rtf is not None:
-                    why = "body should be empty"
-            elif rtf != want:
-                why = "body differs from rendered source"
-        elif why is None:
+        if why is None:
             want_plain = _render(args.cli, body_md, plain=True)
-            if want_plain is not None and \
-                    want_plain.decode("utf-8", "replace") != text:
+            want_text = ("" if want_plain is None
+                         else want_plain.decode("utf-8", "replace"))
+            if want_plain is not None and want_text != text:
                 why = "body text differs from rendered source"
+            elif rtf_ok and want_plain is not None:
+                if not want_text.strip():
+                    if rtf is not None:
+                        why = "body should be empty"
+                elif _fmt_signature(rtf) != _fmt_signature(
+                        _render(args.cli, body_md)):
+                    why = "body formatting differs from rendered source"
 
         if why:
             reasons[why] += 1

@@ -69,6 +69,47 @@ private func protectEscapes(_ s: String) -> String {
     return out
 }
 
+/// Inline code spans are not styled (Journal has no code run), but their
+/// contents must survive verbatim: "Use `**literal**`" should keep its
+/// asterisks rather than turning "literal" bold. Mapping the span's
+/// delimiters onto the same private-use range hides them from the emphasis
+/// regexes, and restoreEscapes puts them back untouched.
+private func protectCodeSpans(_ s: String) -> String {
+    guard s.contains("`") else { return s }
+    var out = ""
+    var span: String? = nil
+    for ch in s {
+        if ch == "`" {
+            if let body = span {
+                out.append(hideAll("`" + body + "`"))
+                span = nil
+            } else {
+                span = ""
+            }
+        } else if span != nil {
+            span?.append(ch)
+        } else {
+            out.append(ch)
+        }
+    }
+    if let unterminated = span { out.append("`"); out.append(unterminated) }
+    return out
+}
+
+/// Map every escapable character in a string onto the private-use range.
+private func hideAll(_ s: String) -> String {
+    var out = ""
+    for ch in s {
+        if let i = ESCAPABLE.firstIndex(of: ch),
+           let scalar = Unicode.Scalar(ESCAPE_BASE + UInt32(i)) {
+            out.unicodeScalars.append(scalar)
+        } else {
+            out.append(ch)
+        }
+    }
+    return out
+}
+
 private func restoreEscapes(_ s: String) -> String {
     var out = ""
     for ch in s {
@@ -114,7 +155,7 @@ private enum LineKind: Equatable {
 
 /// Pull inline emphasis out of a line, leaving styled spans behind.
 private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
-    var s = protectEscapes(line)
+    var s = protectCodeSpans(protectEscapes(line))
 
     // "[text](url)" -> "text (url)", or just the url when the label adds nothing.
     while let m = LINK.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) {

@@ -176,6 +176,7 @@ func cmdWrite(_ a: Args) {
             if !j.isDefault {
                 db.exec("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
                         [pk, j.pk])
+                markJournalsUnsynced(db, [j.pk])
             }
         }
         return pk
@@ -330,10 +331,12 @@ func cmdEdit(_ a: Args) {
 
         if let jsel = a.value("--journal") {
             let j = resolveJournal(db, jsel)
+            let oldJournalPKs = journalPKsForEntry(db, pk)
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             if !j.isDefault {
                 db.exec("insert into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)", [pk, j.pk])
             }
+            markJournalsUnsynced(db, oldJournalPKs + (j.isDefault ? [] : [j.pk]))
         }
     }
 
@@ -371,6 +374,7 @@ func cmdDelete(_ a: Args) {
                 + "  Journal.app, or pass --force if you accept the resurrection risk.")
         }
         if a.has("--hard") {
+            let oldJournalPKs = journalPKsForEntry(db, pk)
             let apks = db.query("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
                 .compactMap { $0.i("Z_PK") }
             for apk in apks {
@@ -379,6 +383,7 @@ func cmdDelete(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
+            markJournalsUnsynced(db, oldJournalPKs)
             if let eu = uString(row.b("ZID")) {
                 try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
             }
@@ -435,6 +440,7 @@ func cmdEmpty(_ a: Args) {
             """) {
             if r.flag("ZISUPLOADEDTOCLOUD") && !a.has("--force") { skipped += 1; continue }
             let pk = r.i("Z_PK") ?? 0
+            let oldJournalPKs = journalPKsForEntry(db, pk)
             for apk in db.query("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
                 .compactMap({ $0.i("Z_PK") }) {
                 db.exec("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", [apk])
@@ -442,6 +448,7 @@ func cmdEmpty(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
+            markJournalsUnsynced(db, oldJournalPKs)
             if let eu = uString(r.b("ZID")) {
                 try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
             }
@@ -455,6 +462,36 @@ func cmdEmpty(_ a: Args) {
             + " Empty Recently Deleted in Journal.app instead (or --force to purge anyway)."
     }
     print(msg)
+}
+
+func cmdSyncJournals(_ a: Args) {
+    let selected = a.value("--journal")
+    if a.has("--dry-run") {
+        let rows: [JournalRow] = withSnapshot { db in
+            if let selected {
+                let journal = resolveJournal(db, selected)
+                if journal.isDefault { die("the default journal has no custom membership record to sync") }
+                return [journal]
+            }
+            return journalRows(db).filter { !$0.isDefault }
+        }
+        print("DRY RUN: would queue \(rows.count) custom journal\(rows.count == 1 ? "" : "s") for membership re-upload. Nothing written.")
+        return
+    }
+
+    let count: Int = withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
+        let rows: [JournalRow]
+        if let selected {
+            let journal = resolveJournal(db, selected)
+            if journal.isDefault { die("the default journal has no custom membership record to sync") }
+            rows = [journal]
+        } else {
+            rows = journalRows(db).filter { !$0.isDefault }
+        }
+        markJournalsUnsynced(db, rows.map(\.pk))
+        return rows.count
+    }
+    print("Queued \(count) custom journal\(count == 1 ? "" : "s") for membership re-upload. Open Journal.app to sync the corrected memberships to other devices.")
 }
 
 func cmdSandbox(_ a: Args) {

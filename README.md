@@ -106,6 +106,10 @@ journal-cli write --live --markdown --body-file entry.md
 
 # target a journal; link photos back to the Photos library
 journal-cli write --live --journal "Travel" --body "..." --media IMG_0079.JPG --photos-link
+
+# repair memberships written by journal-cli 1.0.6 or earlier that looked right
+# on this Mac but appeared in the default Journal on another device
+journal-cli sync-journals --live
 ```
 
 ### Editing
@@ -210,14 +214,14 @@ engine uploads them all to CloudKit — including the attachment files — and a
 delete/restore round trip propagates. The read pipeline has been swept over an
 entire real store: every entry row and all ~700 asset metadata blobs parse.
 
-The test suite (`tests/test_write.sh`, 110 assertions) runs the whole command
+The test suite (`tests/test_write.sh`, 143 assertions) runs the whole command
 surface against a disposable copy of a store — argument guards, insert
 bookkeeping, RTF round-trips, location metadata, media file layout, Live Photo
 pairing, Photos linkage, journal targeting, link assets, the delete/restore
 lifecycle, and `PRAGMA integrity_check`. Point `JOURNAL_SEED` at a backup to
 run it without Full Disk Access. `JOURNAL_CLI` selects the binary under test;
-the Python reference implementation in `reference/` passes the identical
-suite.
+the Python implementation in `reference/` remains an executable reference for
+the original command surface.
 
 ## How it works
 
@@ -240,7 +244,7 @@ the sync cache.)
 | asset metadata | one version byte `0x01` + JSON; `0x02` + UUID = Core Data external storage in `.moments_SUPPORT/_EXTERNAL_DATA/` |
 | links | base64 `NSKeyedArchiver`-archived `LPLinkMetadata` inside the asset metadata |
 | audio | asset metadata carries duration, waveform, and a word-level transcript |
-| journals | `ZJOURNALMO` (names live in each journal's CRDT blob) + `Z_5JOURNALS` join |
+| journals | `ZJOURNALMO` (names live in each journal's CRDT blob) + `Z_5JOURNALS` join; membership changes also mark the custom journal unsynced so its record is re-uploaded |
 | new-row bookkeeping | fresh `Z_PK`, bumped `Z_PRIMARYKEY.Z_MAX`, 16-byte UUID `ZID`, `ZISUPLOADEDTOCLOUD=0` — Journal's sync engine adopts the row and uploads it |
 
 ### The CRDT limitation

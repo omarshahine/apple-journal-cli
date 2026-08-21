@@ -86,6 +86,18 @@ journal-cli --db "$DB" journals --json      # verify counts, then spot-check
 
 Then replay the identical command without `--target-db`.
 
+Imports made with journal-cli 1.0.6 or earlier can look correctly categorized
+on the Mac while another device places every imported entry in the default
+Journal. Repair those existing memberships once with:
+
+```sh
+journal-cli sync-journals --dry-run
+journal-cli sync-journals --live
+```
+
+The repair queues the custom journal records for re-upload; it does not rewrite
+the imported entries or their media.
+
 - **The target journal must already exist** in Journal.app — create it there
   first (journal-cli cannot create journals).
 - **Quit Journal.app** before a live run; `journal-cli` refuses while it runs.

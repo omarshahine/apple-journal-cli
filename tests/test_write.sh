@@ -235,16 +235,29 @@ if [ "$NJ" -ge 2 ]; then
   JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "Test Journal" 2>&1)
   JPK=$(echo "$JOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "join row written" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$JPK;")" "$TJPK"
+  ok "custom journal queued for sync" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  ok "custom journal version bumped" "$(sqlite3 "$DB" "select Z_OPT from ZJOURNALMO where Z_PK=$TJPK;")" "2"
   DOUT=$("$CLI" --db "$DB" write --body "In the default journal." 2>&1)
   DPK=$(echo "$DOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "default write has no join row" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
   "$CLI" --db "$DB" edit $DPK --journal "Test Journal" >/dev/null 2>&1
   ok "edit moves into journal" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "$TJPK"
+  ok "move queues destination journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
   "$CLI" --db "$DB" edit $DPK --journal 1 >/dev/null 2>&1
   ok "edit moves back to default (join row dropped)" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
+  ok "move queues source journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
+  "$CLI" --db "$DB" sync-journals --dry-run >/dev/null 2>&1
+  ok "sync-journals dry-run is read-only" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
+  "$CLI" --db "$DB" sync-journals >/dev/null 2>&1
+  ok "sync-journals repairs existing memberships" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
   "$CLI" --db "$DB" write --body x --journal "No Such Journal" >/dev/null 2>&1
   ok "unknown journal rejected" "$?" "1"
+  sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
   "$CLI" --db "$DB" delete $JPK --hard >/dev/null 2>&1
+  ok "hard delete queues former journal" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "0"
   "$CLI" --db "$DB" delete $DPK --hard >/dev/null 2>&1
 else
   echo "  SKIP  (seed has one journal)"
@@ -375,6 +388,9 @@ if [ $? -eq 0 ]; then
 # comment inside code
 ```')" "1"
   ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
+  ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
+  ok "inline code not bolded"         "$(printf 'Use `**lit**` here' | "$CLI" render | grep -c 'Bold')" "0"
+  ok "code span does not block bold"  "$(printf '`x` and **b**' | "$CLI" render | grep -c 'Bold')" "1"
 
   UOUT=$(printf 'foo__bar__baz and __real bold__' | "$CLI" --db "$DB" write --markdown 2>&1)
   UPK=$(echo "$UOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')

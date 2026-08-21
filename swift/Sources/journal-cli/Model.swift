@@ -172,6 +172,26 @@ func resolveJournal(_ db: DB, _ sel: String) -> JournalRow {
         + hits.map { String($0.pk) }.joined(separator: ", "))
 }
 
+/// Journal syncs custom-journal membership from the JournalMO record, not from
+/// the entry record. Any join-table change therefore has to dirty the affected
+/// custom journal as well as the entry; otherwise the relationship is local-only
+/// and other devices place the entry in the default journal.
+func markJournalsUnsynced(_ db: DB, _ journalPKs: [Int64]) {
+    let pks = Array(Set(journalPKs))
+    for pk in pks {
+        db.exec("""
+            update ZJOURNALMO
+            set ZISUPLOADEDTOCLOUD=0, Z_OPT=coalesce(Z_OPT,0)+1
+            where Z_PK=? and not (ZMERGEABLEATTRIBUTES is null and ZSORTCATEGORY < 0)
+            """, [pk])
+    }
+}
+
+func journalPKsForEntry(_ db: DB, _ entryPK: Int64) -> [Int64] {
+    db.query("select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=?", [entryPK])
+        .compactMap { $0.i("Z_6JOURNALS") }
+}
+
 // ---------------------------------------------------------------- write helpers
 
 func nextPK(_ db: DB, _ entityName: String) -> (ent: Int64, pk: Int64) {

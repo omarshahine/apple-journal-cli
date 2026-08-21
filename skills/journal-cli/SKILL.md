@@ -49,6 +49,7 @@ journal-cli write --live --lat N --lon N --place P --city C
 journal-cli write --live --link URL --link-title T
 journal-cli write --live --journal "Name" ...          # non-default journal
 journal-cli edit <id> --live [same flags; --add-media/--add-link/--remove-media ID/--clear-location/--journal N]
+journal-cli sync-journals --live                       # repair pre-1.0.7 cross-device memberships
 journal-cli delete <id> --live                         # soft; syncs properly
 journal-cli restore <id> --live
 ```
@@ -88,5 +89,9 @@ for anything experimental; replay with `--live` once it looks right.
   entries — it propagates.
 - If the user has a designated test journal, write there
   (`--journal "<name>"`); check `journal-cli journals --json` first.
+- If custom-journal entries look correct on the Mac but appear in the default
+  Journal on another device, run `sync-journals --dry-run` and then
+  `sync-journals --live`. This queues each custom journal record for re-upload;
+  it does not rewrite every entry.
 - Dates print in the machine's local timezone; a stale or invalid `TZ` env
   var in your shell will skew displayed times, not stored ones.

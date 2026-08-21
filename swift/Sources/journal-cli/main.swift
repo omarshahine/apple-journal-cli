@@ -34,6 +34,8 @@ WRITE (guarded: --live required against the real store; auto-backup first)
   delete    <id> [--hard] [--force] [--live]
   restore   <id> [--live]
   empty     [--force] [--live]
+  sync-journals [--journal NAME] [--live]
+            re-upload custom-journal memberships after a direct-store import
   sandbox   --dir DIR [--from DB]      copy the store somewhere safe for testing
   render    [--body B | --body-file F | stdin] [--plain]
             render Markdown to RTF (or plain text) on stdout; writes nothing
@@ -88,6 +90,7 @@ case "edit":     cmdEdit(a)
 case "delete":   cmdDelete(a)
 case "restore":  cmdRestore(a)
 case "empty":    cmdEmpty(a)
+case "sync-journals": cmdSyncJournals(a)
 case "sandbox":  cmdSandbox(a)
 case "render":   cmdRender(a)
 default:
