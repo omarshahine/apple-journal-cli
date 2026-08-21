@@ -40,6 +40,14 @@ private func readBody(_ a: Args) -> String? {
     return nil
 }
 
+private func warnStagingJournal() {
+    FileHandle.standardError.write(
+        ("warning: this is a Mac-local staging membership. "
+         + "Run `sync-journals --journal NAME` for the native Journal.app "
+         + "steps required to sync that membership to other devices.\n")
+            .data(using: .utf8)!)
+}
+
 // Render Markdown the way `write --markdown` would, without touching a store.
 // Lets callers compare an entry's stored text against what it *should* be,
 // which is exact where sniffing for leftover syntax is guesswork.
@@ -102,7 +110,9 @@ func cmdWrite(_ a: Args) {
         print("DRY RUN: would create entry (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)). Nothing written.")
         return
     }
-    let pk: Int64 = withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
+    let created: (pk: Int64, staged: Bool) = withLive(
+        allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")
+    ) { db in
         let (ent, pk) = nextPK(db, "JournalEntryMO")
         db.exec("""
             insert into ZJOURNALENTRYMO
@@ -182,10 +192,10 @@ func cmdWrite(_ a: Args) {
             if !j.isDefault {
                 db.exec("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
                         [pk, j.pk])
-                markJournalsUnsynced(db, [j.pk])
+                return (pk, true)
             }
         }
-        return pk
+        return (pk, false)
     }
 
     var bits: [String] = []
@@ -197,11 +207,12 @@ func cmdWrite(_ a: Args) {
     if hasLoc { bits.append(String(format: "location %.5f,%.5f", lat!, lon!)) }
     if let j = a.value("--journal") { bits.append("journal '\(j)'") }
     let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
-    print("Created entry \(pk) (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)).")
+    print("Created entry \(created.pk) (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)).")
     if a.has("--live") {
         FileHandle.standardError.write(
             "Marked unsynced; Journal.app should upload it on next launch.\n".data(using: .utf8)!)
     }
+    if created.staged { warnStagingJournal() }
 }
 
 func cmdEdit(_ a: Args) {
@@ -235,6 +246,7 @@ func cmdEdit(_ a: Args) {
         return
     }
     var removed = 0
+    var staged = false
     withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
         guard let row = db.one("""
             select Z_PK, ZID, ZMERGEABLEATTRIBUTES from ZJOURNALENTRYMO where Z_PK=?
@@ -246,6 +258,10 @@ func cmdEdit(_ a: Args) {
                 + "  of the text). Editing ZTEXT alone can be reverted or duplicated on sync.\n"
                 + "  Change location/media/date/bookmark freely, edit the text in Journal.app,\n"
                 + "  or pass --force to write ZTEXT anyway.")
+        }
+        if a.value("--journal") != nil, row.b("ZMERGEABLEATTRIBUTES") != nil {
+            die("entry \(pk) already has Journal merge attributes. A direct journal move\n"
+                + "  would be Mac-local and can be reverted by iCloud. Move it in Journal.app.")
         }
 
         var sets: [String] = []
@@ -338,12 +354,11 @@ func cmdEdit(_ a: Args) {
 
         if let jsel = a.value("--journal") {
             let j = resolveJournal(db, jsel)
-            let oldJournalPKs = journalPKsForEntry(db, pk)
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             if !j.isDefault {
                 db.exec("insert into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)", [pk, j.pk])
+                staged = true
             }
-            markJournalsUnsynced(db, oldJournalPKs + (j.isDefault ? [] : [j.pk]))
         }
     }
 
@@ -359,6 +374,7 @@ func cmdEdit(_ a: Args) {
     if addLink != nil { bits.append("1 link added") }
     if let j = a.value("--journal") { bits.append("moved to journal '\(j)'") }
     print("Updated entry \(pk) (\(bits.joined(separator: ", "))).")
+    if staged { warnStagingJournal() }
 }
 
 func cmdDelete(_ a: Args) {
@@ -381,7 +397,6 @@ func cmdDelete(_ a: Args) {
                 + "  Journal.app, or pass --force if you accept the resurrection risk.")
         }
         if a.has("--hard") {
-            let oldJournalPKs = journalPKsForEntry(db, pk)
             let apks = db.query("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
                 .compactMap { $0.i("Z_PK") }
             for apk in apks {
@@ -390,7 +405,6 @@ func cmdDelete(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
-            markJournalsUnsynced(db, oldJournalPKs)
             if let eu = uString(row.b("ZID")) {
                 try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
             }
@@ -447,7 +461,6 @@ func cmdEmpty(_ a: Args) {
             """) {
             if r.flag("ZISUPLOADEDTOCLOUD") && !a.has("--force") { skipped += 1; continue }
             let pk = r.i("Z_PK") ?? 0
-            let oldJournalPKs = journalPKsForEntry(db, pk)
             for apk in db.query("select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
                 .compactMap({ $0.i("Z_PK") }) {
                 db.exec("delete from ZJOURNALENTRYASSETFILEATTACHMENTMO where ZASSET=?", [apk])
@@ -455,7 +468,6 @@ func cmdEmpty(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
-            markJournalsUnsynced(db, oldJournalPKs)
             if let eu = uString(r.b("ZID")) {
                 try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
             }
@@ -473,32 +485,46 @@ func cmdEmpty(_ a: Args) {
 
 func cmdSyncJournals(_ a: Args) {
     let selected = a.value("--journal")
-    if a.has("--dry-run") {
-        let rows: [JournalRow] = withSnapshot { db in
-            if let selected {
-                let journal = resolveJournal(db, selected)
-                if journal.isDefault { die("the default journal has no custom membership record to sync") }
-                return [journal]
-            }
-            return journalRows(db).filter { !$0.isDefault }
-        }
-        print("DRY RUN: would queue \(rows.count) custom journal\(rows.count == 1 ? "" : "s") for membership re-upload. Nothing written.")
-        return
-    }
-
-    let count: Int = withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
+    let repairs: [(journal: JournalRow, count: Int64)] = withSnapshot { db in
         let rows: [JournalRow]
         if let selected {
             let journal = resolveJournal(db, selected)
-            if journal.isDefault { die("the default journal has no custom membership record to sync") }
+            if journal.isDefault { die("the default journal has no custom membership to audit") }
             rows = [journal]
         } else {
             rows = journalRows(db).filter { !$0.isDefault }
         }
-        markJournalsUnsynced(db, rows.map(\.pk))
-        return rows.count
+        return rows.compactMap { journal in
+            let count = db.one("""
+                select count(*) as N
+                from Z_5JOURNALS j
+                join ZJOURNALENTRYMO e on e.Z_PK=j.Z_5ENTRIES
+                where j.Z_6JOURNALS=? and e.ZMERGEABLEATTRIBUTES is null
+                  and coalesce(e.ZISFULLYREMOVED,0)=0
+                  and coalesce(e.ZRECENTLYDELETED,0)=0
+                """, [journal.pk])?.i("N") ?? 0
+            return count > 0 ? (journal, count) : nil
+        }
     }
-    print("Queued \(count) custom journal\(count == 1 ? "" : "s") for membership re-upload. Open Journal.app to sync the corrected memberships to other devices.")
+    guard !repairs.isEmpty else {
+        print("No Mac-local custom-journal memberships found.")
+        return
+    }
+    print("Mac-local memberships that require finalization in Journal.app:")
+    for repair in repairs {
+        print("  \(repair.journal.name): \(repair.count) entr\(repair.count == 1 ? "y" : "ies")")
+    }
+    print("""
+
+Direct database relationships do not contain Journal's per-entry iCloud merge data.
+For each journal above:
+  1. In Journal.app, create a new final journal with a different name.
+  2. Open the staging journal, then choose Select Entries > Select All.
+  3. Choose Move / Choose Journals and select the new final journal.
+  4. Wait until the staging journal shows 0 entries and iCloud finishes syncing.
+
+This command is read-only. --live and --dry-run are accepted for compatibility.
+""")
 }
 
 func cmdSandbox(_ a: Args) {

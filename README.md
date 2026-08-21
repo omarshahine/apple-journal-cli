@@ -104,12 +104,11 @@ journal-cli write --live --body "Read this" --link https://example.com --link-ti
 # markdown -> Journal's own rich text (bold, italic, lists, strikethrough)
 journal-cli write --live --markdown --body-file entry.md
 
-# target a journal; link photos back to the Photos library
+# stage in a Mac-local journal; link photos back to the Photos library
 journal-cli write --live --journal "Travel" --body "..." --media IMG_0079.JPG --photos-link
 
-# repair memberships written by journal-cli 1.0.6 or earlier that looked right
-# on this Mac but appeared in the default Journal on another device
-journal-cli sync-journals --live
+# audit staged memberships and print the native Journal.app finalization steps
+journal-cli sync-journals --journal "Travel"
 ```
 
 ### Editing
@@ -120,7 +119,7 @@ journal-cli edit 103 --live --lat 47.6 --lon -122.3 --place Home   # set/replace
 journal-cli edit 103 --live --add-media c.heic --add-link https://example.org
 journal-cli edit 103 --live --remove-media 700                     # ids shown by `show`
 journal-cli edit 103 --live --clear-location --no-bookmark
-journal-cli edit 103 --live --journal "Travel"                     # move journals
+journal-cli edit 103 --live --journal "Travel"                     # stage an imported entry
 ```
 
 ### Deleting
@@ -214,7 +213,7 @@ engine uploads them all to CloudKit — including the attachment files — and a
 delete/restore round trip propagates. The read pipeline has been swept over an
 entire real store: every entry row and all ~700 asset metadata blobs parse.
 
-The test suite (`tests/test_write.sh`, 146 assertions) runs the whole command
+The test suite (`tests/test_write.sh`) runs the whole command
 surface against a disposable copy of a store — argument guards, insert
 bookkeeping, RTF round-trips, location metadata, media file layout, Live Photo
 pairing, Photos linkage, journal targeting, link assets, the delete/restore
@@ -244,7 +243,7 @@ the sync cache.)
 | asset metadata | one version byte `0x01` + JSON; `0x02` + UUID = Core Data external storage in `.moments_SUPPORT/_EXTERNAL_DATA/` |
 | links | base64 `NSKeyedArchiver`-archived `LPLinkMetadata` inside the asset metadata |
 | audio | asset metadata carries duration, waveform, and a word-level transcript |
-| journals | `ZJOURNALMO` (names live in each journal's CRDT blob) + `Z_5JOURNALS` join; membership changes also mark the custom journal unsynced so its record is re-uploaded |
+| journals | `ZJOURNALMO` (names live in each journal's merge blob) + `Z_5JOURNALS` join; direct join changes are Mac-local until Journal.app performs a native move and authors the per-entry merge data |
 | new-row bookkeeping | fresh `Z_PK`, bumped `Z_PRIMARYKEY.Z_MAX`, 16-byte UUID `ZID`, `ZISUPLOADEDTOCLOUD=0` — Journal's sync engine adopts the row and uploads it |
 
 ### The CRDT limitation
@@ -262,8 +261,8 @@ entry whose text was typed in the app. Consequences:
 - **`edit` refuses to rewrite text on CRDT-bearing entries** unless `--force`
   is passed: rewriting only the RTF leaves the CRDT holding the old text with
   authoritative history, and sync can revert or duplicate the edit. Location,
-  media, links, date, bookmark and journal moves are safe on any entry — none
-  of that state lives in the CRDT (verified across a real library).
+  media, links, date, and bookmark remain editable. Journal moves on entries
+  with merge data must be performed in Journal.app so they sync correctly.
 - **CLI-written entries have no CRDT.** Journal renders and syncs them fine,
   but a simultaneous edit on two devices may not merge like an app-authored
   entry would.
