@@ -37,7 +37,7 @@ WRITE (guarded: --live required against the real store; auto-backup first)
   sync-journals [--journal NAME] [--live]
             re-upload custom-journal memberships after a direct-store import
   sandbox   --dir DIR [--from DB]      copy the store somewhere safe for testing
-  render    [--body B | --body-file F | stdin] [--plain]
+  render    [--body B | --body-file F | stdin] [--plain | --inline]
             render Markdown to RTF (or plain text) on stdout; writes nothing
 
   --markdown renders the body (and de-escapes the title) as Markdown into
@@ -64,7 +64,7 @@ guard let cmd = argv.first, cmd != "--help", cmd != "-h", cmd != "help" else {
 let rest = Array(argv.dropFirst())
 
 let boolFlags: Set<String> = ["--json", "--full", "--include-empty", "--bookmark",
-                              "--dry-run", "--accept-risk", "--markdown", "--plain",
+                              "--dry-run", "--accept-risk", "--markdown", "--plain", "--inline",
                               "--no-bookmark", "--live", "--hard", "--force",
                               "--clear-location", "--remove-all-media",
                               "--photos-link", "--no-resize"]

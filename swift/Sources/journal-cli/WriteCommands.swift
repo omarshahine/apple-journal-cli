@@ -43,7 +43,9 @@ private func readBody(_ a: Args) -> String? {
 // which is exact where sniffing for leftover syntax is guesswork.
 func cmdRender(_ a: Args) {
     let md = readBody(a) ?? ""
-    if a.has("--plain") {
+    if a.has("--inline") {
+        FileHandle.standardOutput.write(Data(markdownToInlinePlain(md).utf8))
+    } else if a.has("--plain") {
         FileHandle.standardOutput.write(Data(markdownToPlain(md).utf8))
     } else {
         FileHandle.standardOutput.write(markdownToRTF(md).data)
@@ -75,14 +77,14 @@ func cmdWrite(_ a: Args) {
     if hasLoc && (lat == nil || lon == nil) { die("--lat and --lon must be given together") }
     let link = a.value("--link")
     let hasText = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    if !hasText && media.isEmpty && lp == nil && !hasLoc && link == nil {
-        die("nothing to write (need --body/--body-file/stdin, --media, --live-photo, --link, or --lat/--lon)")
+    let title = a.value("--title").map { a.has("--markdown") ? markdownToInlinePlain($0) : $0 }
+    if !hasText && title == nil && media.isEmpty && lp == nil && !hasLoc && link == nil {
+        die("nothing to write (need --title, --body/--body-file/stdin, --media, --live-photo, --link, or --lat/--lon)")
     }
 
     let when = a.value("--date").map(parseDate) ?? Date()
     let ts = cd(when)
     let entryUUID = uid()
-    let title = a.value("--title").map { a.has("--markdown") ? markdownToPlain($0) : $0 }
 
     if a.has("--dry-run") {
         var bits: [String] = []
@@ -201,7 +203,7 @@ func cmdEdit(_ a: Args) {
     let rtfBody = readBodyRTF(a)
     guard let idStr = a.positional.first, let pk = Int64(idStr) else { die("edit needs an entry id") }
     let body = rtfBody?.plain ?? readBody(a)
-    let title = a.value("--title").map { a.has("--markdown") ? markdownToPlain($0) : $0 }
+    let title = a.value("--title").map { a.has("--markdown") ? markdownToInlinePlain($0) : $0 }
     let media = a.values("--add-media").map { (($0 as NSString).expandingTildeInPath as NSString).standardizingPath }
     for m in media where !FileManager.default.fileExists(atPath: m) {
         die("media file not found: \(m)")

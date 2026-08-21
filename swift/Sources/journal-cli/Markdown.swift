@@ -325,8 +325,29 @@ func markdownToRTF(_ md: String) -> (data: Data, plain: String) {
     return (d, att.string)
 }
 
-/// Strip Markdown to plain text — for fields like the title that carry no
-/// formatting but still arrive with Markdown escaping in them.
+/// The text as it reads once stored: rendering to RTF and parsing back drops
+/// generated list marker runs, so this is what a reader of the saved entry
+/// actually sees. Comparing anything else against a stored entry compares
+/// two different things.
 func markdownToPlain(_ md: String) -> String {
-    markdownToAttributed(md).string
+    let att = markdownToAttributed(md)
+    guard let d = att.rtf(from: NSRange(location: 0, length: att.length),
+                          documentAttributes: [:]),
+          let round = NSAttributedString(rtf: d, documentAttributes: nil) else {
+        return att.string
+    }
+    return round.string
+}
+
+/// Inline-only stripping, for single-line fields such as the title. Block
+/// syntax must not apply there: a title of "1. first" is a title, not a list
+/// item, and "---" is a title, not a horizontal rule.
+func markdownToInlinePlain(_ md: String) -> String {
+    let lines = md.replacingOccurrences(of: "\r\n", with: "\n")
+                  .replacingOccurrences(of: "\r", with: "\n")
+                  .components(separatedBy: "\n")
+    return lines
+        .map { inlineSpans($0, forceBold: false).map { $0.text }.joined() }
+        .joined(separator: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 }

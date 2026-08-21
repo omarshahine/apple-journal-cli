@@ -389,6 +389,15 @@ if [ $? -eq 0 ]; then
 ```')" "1"
   ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
   ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
+  ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
+  ok "title keeps rule-like text"     "$(printf -- '---' | "$CLI" render --inline)" "---"
+  ok "title de-escapes"               "$(printf 'Day 9 \\- N' | "$CLI" render --inline)" "Day 9 - N"
+  ok "list plain omits markers"       "$(printf -- '- alpha\n- beta' | "$CLI" render --plain)" "alpha
+beta"
+  TOUT=$("$CLI" --db "$DB" write --markdown --title 'Only a title' 2>&1)
+  TPK=$(echo "$TOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "title-only entry allowed"       "$("$CLI" --db "$DB" show $TPK --json | jq_ 'd["title"]')" "Only a title"
+  ok "title-only stored list-title"   "$("$CLI" --db "$DB" write --markdown --title '1. first' 2>&1 | grep -c 'Created entry')" "1"
   ok "inline code not bolded"         "$(printf 'Use `**lit**` here' | "$CLI" render | grep -c 'Bold')" "0"
   ok "code span does not block bold"  "$(printf '`x` and **b**' | "$CLI" render | grep -c 'Bold')" "1"
 

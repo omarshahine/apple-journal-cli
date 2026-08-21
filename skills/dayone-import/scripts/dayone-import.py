@@ -426,9 +426,17 @@ def _fmt_signature(rtf):
     return tuple(len(pat.findall(rtf)) for _name, pat in _FMT_CONTROLS)
 
 
-def _render(cli, md, plain=False):
-    """What journal-cli --markdown would store for this source, or None."""
-    cmd = [cli, "render"] + (["--plain"] if plain else [])
+def _render(cli, md, plain=False, inline=False):
+    """What journal-cli --markdown would store for this source, or None.
+
+    `inline` matches how a title is rendered: no block handling, so a title
+    of "1. first" stays a title rather than becoming a list item.
+    """
+    cmd = [cli, "render"]
+    if inline:
+        cmd.append("--inline")
+    elif plain:
+        cmd.append("--plain")
     r = subprocess.run(cmd, input=(md or "").encode("utf-8"),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return None if r.returncode else r.stdout
@@ -466,7 +474,7 @@ def cmd_fix_text(args):
         why = None
 
         want_title = _render(args.cli, e.get("title_md") or e["title"] or "",
-                             plain=True)
+                             inline=True)
         if want_title is not None and want_title.decode("utf-8", "replace") != title:
             why = "title differs from rendered source"
 
