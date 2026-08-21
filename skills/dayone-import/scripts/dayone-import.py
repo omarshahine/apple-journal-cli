@@ -337,8 +337,8 @@ def cmd_fix_locations(args):
         return
 
     ok = 0
-    backups_before = (set(_backup_dirs())
-                      if not args.target_db and args.prune_backups else set())
+    prune = bool(args.prune_backups) and not args.target_db
+    backups_before = set(_backup_dirs()) if prune else set()
     for n, (e, pk, got, off, place, city) in enumerate(fixes, 1):
         cmd = [args.cli]
         if args.target_db:
@@ -357,9 +357,9 @@ def cmd_fix_locations(args):
                              % (pk, (r.stderr or r.stdout).strip().split("\n")[-1]))
         else:
             ok += 1
-        if backups_before and n % 25 == 0:
+        if prune and n % 25 == 0:
             _prune_backups(backups_before)
-    if backups_before:
+    if prune:
         _prune_backups(backups_before)
     print("\nRelocated %d of %d." % (ok, len(fixes)))
 
@@ -372,6 +372,10 @@ ARTIFACTS = [
     re.compile(r"\[[^\]]+\]\([^)\s]+\)"),                 # [text](url)
 ]
 
+
+# A backslash escape and the character it protects, replaced wholesale before
+# looking for formatting so the escaped delimiter cannot match.
+ESCAPED_PAIR = re.compile(r"\\.", re.S)
 
 # Constructs in the Day One source that must survive as real formatting.
 SOURCE_FEATURES = {
@@ -448,7 +452,10 @@ def cmd_fix_text(args):
             # Only the body is stored as RTF; the title is a separate plain
             # field. Comparing title markup against the body's RTF would
             # never match and would rewrite the entry on every run.
-            source = e.get("body_md") or ""
+            # Neutralize backslash-escaped characters first: "\\*literal\\*"
+            # is not emphasis, and matching it here would report lost
+            # formatting and rewrite the same entry on every run.
+            source = ESCAPED_PAIR.sub("x", e.get("body_md") or "")
             for name, pat in SOURCE_FEATURES.items():
                 if pat.search(source) and RTF_MARKERS[name] not in rtf:
                     why = "lost %s formatting" % name
@@ -473,8 +480,10 @@ def cmd_fix_text(args):
         return
 
     ok = fail = 0
-    backups_before = (set(_backup_dirs())
-                      if not args.target_db and args.prune_backups else set())
+    # Gate on the option, not on whether the keep set happens to be non-empty:
+    # a first run against an empty ~/Backups would otherwise skip pruning.
+    prune = bool(args.prune_backups) and not args.target_db
+    backups_before = set(_backup_dirs()) if prune else set()
     for n, (e, pk) in enumerate(todo, 1):
         cmd = [args.cli]
         if args.target_db:
@@ -506,9 +515,9 @@ def cmd_fix_text(args):
             ok += 1
         if n % 100 == 0:
             print("   %d/%d" % (n, len(todo)))
-        if backups_before and n % 25 == 0:
+        if prune and n % 25 == 0:
             _prune_backups(backups_before)
-    if backups_before:
+    if prune:
         _prune_backups(backups_before)
     print("\nRewrote %d, failed %d." % (ok, fail))
 

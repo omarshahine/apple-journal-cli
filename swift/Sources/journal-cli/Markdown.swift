@@ -33,7 +33,10 @@ private let BULLET = rx("^[ \\t]{0,3}[-*+][ \\t]+(.*)$")
 private let ORDERED = rx("^[ \\t]{0,3}[0-9]{1,9}[.)][ \\t]+(.*)$")
 private let QUOTE = rx("^[ \\t]{0,3}>[ \\t]?(.*)$")
 private let LINK = rx("\\[([^\\]]*)\\]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
-private let STRONG = rx("(\\*\\*|__)(?=\\S)(.+?)(?<=\\S)\\1")
+private let STRONG_STAR = rx("\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*")
+// Underscores need flanking rules that asterisks do not: "foo__bar__baz" is
+// an identifier, not emphasis.
+private let STRONG_UNDER = rx("(?<![\\w_])__(?=\\S)(.+?)(?<=\\S)__(?![\\w_])")
 private let STRIKE = rx("(~~)(?=\\S)(.+?)(?<=\\S)\\1")
 private let EMPH = rx("(?<![\\w*_])([*_])(?=\\S)([^*_]+?)(?<=\\S)\\1(?![\\w*_])")
 // Characters Markdown lets you escape. An escaped delimiter must survive
@@ -125,7 +128,8 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
 
     // Mark emphasis with sentinels so the spans survive unescaping.
     let B = "\u{1}", I = "\u{2}", S = "\u{3}"
-    s = sub(s, STRONG, "\(B)$2\(B)")
+    s = sub(s, STRONG_STAR, "\(B)$1\(B)")
+    s = sub(s, STRONG_UNDER, "\(B)$1\(B)")
     s = sub(s, STRIKE, "\(S)$2\(S)")
     s = sub(s, EMPH, "\(I)$2\(I)")
 
