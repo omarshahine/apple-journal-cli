@@ -216,6 +216,75 @@ def photos_lookup(path):
     return None
 
 
+# ---------------------------------------------------------------- links
+
+MKLINK_SWIFT = r"""
+import Foundation
+import LinkPresentation
+let args = CommandLine.arguments
+guard args.count >= 2, let url = URL(string: args[1]) else { exit(1) }
+let md = LPLinkMetadata()
+md.originalURL = url
+md.url = url
+if args.count >= 3 { md.title = args[2] }
+let data = try NSKeyedArchiver.archivedData(withRootObject: md, requiringSecureCoding: true)
+print(data.base64EncodedString())
+"""
+
+def make_link_payload(url, title=None):
+    """base64 NSKeyedArchiver LPLinkMetadata, the format Journal's link assets use."""
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.netloc:
+        die(f"--link needs an absolute http(s) URL, got {url!r}")
+    if not shutil.which("swift"):
+        die("writing a link needs the `swift` CLI (Xcode or Command Line Tools)")
+    d = tempfile.mkdtemp(prefix="journal-link.")
+    try:
+        src = os.path.join(d, "mklink.swift")
+        open(src, "w").write(MKLINK_SWIFT)
+        args = ["swift", src, url] + ([title] if title else [])
+        r = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 or not r.stdout.strip():
+            die(f"could not build link metadata for {url!r}: {r.stderr.strip()[:200]}")
+        return r.stdout.strip()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+def decode_link_payload(meta):
+    """Pull url/title back out of a link asset's archived LPLinkMetadata."""
+    import base64, plistlib
+    try:
+        raw = base64.b64decode(meta.get("data", ""))
+        objs = plistlib.loads(raw).get("$objects", [])
+        strs = [o for o in objs if isinstance(o, str) and o != "$null"]
+        url = next((o for o in strs if o.startswith(("http://", "https://"))), None)
+        title = next((o for o in strs if not o.startswith(("http://", "https://"))
+                      and "/" not in o and not o.endswith(".ico")), None)
+        return url, title
+    except Exception:
+        return None, None
+
+def external_data_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(DB)),
+                        ".moments_SUPPORT", "_EXTERNAL_DATA")
+
+def resolve_meta(m):
+    """parse_meta, following a version-2 external-storage ref to its file."""
+    p = parse_meta(m)
+    if isinstance(p, dict) and set(p) == {"ref"}:
+        f = os.path.join(external_data_dir(), p["ref"])
+        if os.path.exists(f):
+            try:
+                ext = json.loads(open(f, "rb").read())
+                if isinstance(ext, dict):
+                    ext["_external"] = p["ref"]
+                    return ext
+            except Exception:
+                pass
+    return p
+
+
 # ---------------------------------------------------------------- metadata blobs
 
 def meta_blob(obj):
@@ -279,7 +348,7 @@ def assets_for(conn, pk):
         from ZJOURNALENTRYASSETMO where ZENTRY=? order by Z_PK""", (pk,)).fetchall()
     out = []
     for r in rows:
-        m = parse_meta(r["ZASSETMETADATA"])
+        m = resolve_meta(r["ZASSETMETADATA"])
         if not isinstance(m, dict): m = {}
         a = {"id": r["Z_PK"], "uuid": u_str(r["ZID"]), "type": r["ZASSETTYPE"],
              "source": r["ZSOURCE"], "files": []}
@@ -290,6 +359,10 @@ def assets_for(conn, pk):
                             "lat": v.get("latitude"), "lon": v.get("longitude")}
                            for v in visits
                            if isinstance(v, dict) and v.get("latitude") is not None]
+        elif r["ZASSETTYPE"] == "link":
+            url, title = decode_link_payload(m)
+            if url: a["url"] = url
+            if title: a["link_title"] = title
         elif isinstance(m, dict) and "latitude" in m:
             a["place"] = {"name": m.get("placeName"), "lat": m.get("latitude"),
                           "lon": m.get("longitude")}
@@ -348,6 +421,9 @@ def cmd_show(a):
     print()
     print(e["text"] or "(no text)")
     for asset in e["assets"]:
+        if asset.get("url"):
+            t = f"  {asset['link_title']}" if asset.get("link_title") else ""
+            print(f"\nlink (asset {asset['id']})  {asset['url']}{t}")
         if asset.get("places"):
             for p in asset["places"]:
                 loc = ", ".join(x for x in (p.get("name"), p.get("city")) if x)
@@ -537,8 +613,9 @@ def cmd_write(a):
     has_loc = a.lat is not None or a.lon is not None
     if has_loc and (a.lat is None or a.lon is None):
         die("--lat and --lon must be given together")
-    if not (body and body.strip()) and not media and not lp and not has_loc:
-        die("nothing to write (need --body/--body-file/stdin, --media, --live-photo, or --lat/--lon)")
+    if not (body and body.strip()) and not media and not lp and not has_loc and not a.link:
+        die("nothing to write (need --body/--body-file/stdin, --media, --live-photo, "
+            "--link, or --lat/--lon)")
     body = body or ""
 
     when = parse_date(a.date) if a.date else datetime.datetime.now()
@@ -589,6 +666,14 @@ def cmd_write(a):
             add_file(conn, apk, au, entry_uuid, lp[1], 0, resize=False, plain_name=True)
             ordering += [au, idx]; idx += 1
 
+        if a.link:
+            payload = make_link_payload(a.link, a.link_title)
+            apk, au = add_asset(conn, pk, entry_uuid, "link", "shareSheet",
+                                {"data": payload, "date": cd_now()})
+            conn.execute("update ZJOURNALENTRYASSETMO set ZCONTENTTYPE='unknown' where Z_PK=?",
+                         (apk,))
+            ordering += [au, idx]; idx += 1
+
         if has_loc:
             visit = {"latitude": a.lat, "longitude": a.lon,
                      "createdDate": cd_now(), "visitStartTime": ts, "visitEndTime": ts,
@@ -615,6 +700,7 @@ def cmd_write(a):
     bits = [f"{len(body)} chars"] if body.strip() else []
     if media: bits.append(f"{len(media)} media")
     if lp: bits.append("1 live photo")
+    if a.link: bits.append("1 link")
     if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
     if a.journal: bits.append(f"journal {a.journal!r}")
     print(f"Created entry {pk} ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}.")
@@ -679,7 +765,7 @@ def cmd_edit(a):
         die("--lat and --lon must be given together")
     bookmark = True if a.bookmark else (False if a.no_bookmark else None)
     touches_text = body is not None or a.title is not None
-    if not any([touches_text, media, has_loc, a.clear_location,
+    if not any([touches_text, media, has_loc, a.clear_location, a.add_link,
                 a.remove_media, a.remove_all_media, a.journal,
                 a.date is not None, bookmark is not None]):
         die("nothing to change")
@@ -755,6 +841,14 @@ def cmd_edit(a):
                               {"revision": 2, "visitsData": [visit]}, slim=1)
             added.append(au)
 
+        if a.add_link:
+            payload = make_link_payload(a.add_link, a.link_title)
+            apk, au = add_asset(conn, a.id, entry_uuid, "link", "shareSheet",
+                                {"data": payload, "date": cd_now()})
+            conn.execute("update ZJOURNALENTRYASSETMO set ZCONTENTTYPE='unknown' where Z_PK=?",
+                         (apk,))
+            added.append(au)
+
         if added: ordering_append(conn, a.id, added)
 
         if a.journal:
@@ -773,6 +867,7 @@ def cmd_edit(a):
     if has_loc: bits.append("location set")
     if media: bits.append(f"{len(media)} media added")
     if a.remove_media or a.remove_all_media: bits.append(f"{removed} media removed")
+    if a.add_link: bits.append("1 link added")
     if a.journal: bits.append(f"moved to journal {a.journal!r}")
     print(f"Updated entry {a.id} ({', '.join(bits)}).")
 
@@ -885,6 +980,8 @@ def main():
     w.add_argument("--lat", type=float); w.add_argument("--lon", type=float)
     w.add_argument("--place", help="place name for the location pin")
     w.add_argument("--city")
+    w.add_argument("--link", metavar="URL", help="attach a web link")
+    w.add_argument("--link-title", help="title for --link (default: none)")
     w.add_argument("--journal", help="journal name or id (default: the app's default journal)")
     w.add_argument("--live", action="store_true", help="allow writing to the real store")
     w.set_defaults(func=cmd_write)
@@ -904,6 +1001,8 @@ def main():
     ed.add_argument("--lat", type=float); ed.add_argument("--lon", type=float)
     ed.add_argument("--place"); ed.add_argument("--city")
     ed.add_argument("--clear-location", action="store_true")
+    ed.add_argument("--add-link", metavar="URL")
+    ed.add_argument("--link-title")
     ed.add_argument("--journal", help="move the entry to this journal (name or id)")
     ed.add_argument("--force", action="store_true",
                     help="edit text even when the entry has a CRDT copy")

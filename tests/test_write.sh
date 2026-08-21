@@ -244,6 +244,26 @@ else
   echo "  SKIP  (seed has one journal)"
 fi
 
+echo "T14 links"
+if command -v swift >/dev/null; then
+  KOUT=$("$CLI" --db "$DB" write --body "With a link." --link "https://example.com/post" --link-title "Example Post" 2>&1)
+  KPK=$(echo "$KOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "link asset row" "$(sqlite3 "$DB" "select ZASSETTYPE from ZJOURNALENTRYASSETMO where ZENTRY=$KPK;")" "link"
+  ok "source shareSheet" "$(sqlite3 "$DB" "select ZSOURCE from ZJOURNALENTRYASSETMO where ZENTRY=$KPK;")" "shareSheet"
+  ok "contenttype unknown" "$(sqlite3 "$DB" "select ZCONTENTTYPE from ZJOURNALENTRYASSETMO where ZENTRY=$KPK;")" "unknown"
+  ok "no file attachments" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETFILEATTACHMENTMO fa join ZJOURNALENTRYASSETMO a on a.Z_PK=fa.ZASSET where a.ZENTRY=$KPK;")" "0"
+  ok "url round-trips" "$("$CLI" --db "$DB" show $KPK --json | jq_ 'd["assets"][0]["url"]')" "https://example.com/post"
+  ok "title round-trips" "$("$CLI" --db "$DB" show $KPK --json | jq_ 'd["assets"][0]["link_title"]')" "Example Post"
+  ok "in ordering" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING) from ZJOURNALENTRYMO where Z_PK=$KPK;")" "2"
+  "$CLI" --db "$DB" write --body x --link "notaurl" >/dev/null 2>&1
+  ok "bad url rejected" "$?" "1"
+  "$CLI" --db "$DB" edit $KPK --add-link "https://example.org/second" >/dev/null 2>&1
+  ok "edit adds second link" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$KPK and ZASSETTYPE='link';")" "2"
+  "$CLI" --db "$DB" delete $KPK --hard >/dev/null 2>&1
+else
+  echo "  SKIP  (no swift)"
+fi
+
 echo "T13 synced hard-delete guard"
 SPKS=$(sqlite3 "$DB" "select Z_PK from ZJOURNALENTRYMO where ZISUPLOADEDTOCLOUD=1 and coalesce(ZRECENTLYDELETED,0)=0 limit 1;")
 if [ -n "$SPKS" ]; then

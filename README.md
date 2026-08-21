@@ -76,6 +76,10 @@ journal-cli write --live --body "Golden hour" --live-photo IMG_0123.heic IMG_012
 # link media back to the Photos library (writes assetIdentifier via Photos.sqlite lookup)
 journal-cli write --live --body "..." --media IMG_0079.JPG --photos-link
 
+# attach a web link (rendered as a rich link card)
+journal-cli write --live --body "Read this" --link https://example.com/post --link-title "A Post"
+journal-cli edit 103 --live --add-link https://example.com/other
+
 # location pin
 journal-cli write --live --body "At the office" \
     --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle
@@ -127,11 +131,15 @@ and written beside that database rather than in your real `Attachments/`.
 | bookmark | `ZFLAGGED` (verified: Journal shows the Bookmarked badge) |
 | photo / video | `ZJOURNALENTRYASSETMO` type `photo`/`video`, source `imagePicker`, plus a `ZJOURNALENTRYASSETFILEATTACHMENTMO` row |
 | location | `ZJOURNALENTRYASSETMO` type `multiPinMap`, source `locationPicker`, `ZISSLIM=1` |
+| web link | `ZJOURNALENTRYASSETMO` type `link`, source `shareSheet`; metadata `data` is a base64 `NSKeyedArchiver`-archived `LPLinkMetadata` (built via a Swift helper, needs the `swift` CLI) |
 | asset order | `ZASSETORDERING`, plain JSON `[assetUUID, index, ...]` |
 
 Asset metadata (`ZASSETMETADATA`) is **one version byte `0x01` followed by
-JSON**; a `0x02` version byte instead carries a bare UUID reference to an
-externally stored payload (drawing, workoutRoute, and link assets).
+JSON**; a `0x02` version byte instead carries a bare UUID reference into
+`.moments_SUPPORT/_EXTERNAL_DATA/` — Core Data external storage for oversized
+payloads (drawings, workout routes, links with cached preview images). The
+reader follows those refs; written links stay inline since a fresh
+`LPLinkMetadata` without images is under 1 KB.
 For a location that is `{"revision":2,"visitsData":[{latitude, longitude,
 placeName, city, visitStartTime, ...}]}`. For a photo it carries `latitude`,
 `longitude`, `placeName`, crop rects and `date`.
@@ -186,7 +194,7 @@ Journal stores twelve asset types. This tool writes three:
 | `workoutRoute` | 3 | read metadata only |
 | `workoutIcon` | 3 | read metadata only |
 | `motionActivity` | 1 | read metadata only |
-| `link` | 1 | read metadata only |
+| `link` | 1 | read + write |
 | `genericMap` | 1 | read only |
 | `drawing` | 1 | read metadata only |
 
@@ -238,7 +246,7 @@ tests/test_write.sh                                   # seeds from the live stor
 JOURNAL_SEED=~/Backups/journal-cli/<ts>/moments.sqlite tests/test_write.sh
 ```
 
-93 assertions against a throwaway copy: argument guards, insert bookkeeping,
+102 assertions against a throwaway copy: argument guards, insert bookkeeping,
 RTF round-trip, location metadata and coordinates, photo/video asset rows,
 attachment file layout on disk, asset ordering, Markdown export of media and
 locations, every `edit` operation (including media removal) and its CRDT guard, image
