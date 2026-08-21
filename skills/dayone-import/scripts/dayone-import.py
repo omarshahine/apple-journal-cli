@@ -21,12 +21,67 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dayone, exifgps, photoslib
 from dayone import die
 
-STATE_DIR = os.path.expanduser("~/.local/state/dayone-import")
+# The import ledger maps Day One entry UUIDs to the Journal rows they became.
+# Nothing can regenerate it, and fix-text / fix-locations need it months later,
+# so the durable copy lives in the Plugin Data Worker -- the same place the
+# rest of this machine's tool state lives -- with a local cache for speed.
+# Writing over the network every few entries would stall a large import, so
+# the cache is authoritative during a run and published when it finishes.
+STATE_DIR = os.path.expanduser(
+    os.environ.get("DAYONE_IMPORT_STATE", "~/.local/state/dayone-import"))
+PLUGIN_DATA = os.path.expanduser("~/.local/bin/plugin-data")
+REMOTE_PREFIX = "journal-cli/dayone-import"
+
+
+def _remote_key(path):
+    return "%s/%s" % (REMOTE_PREFIX, os.path.basename(path))
+
+
+def _remote(args, *extra, **kw):
+    """Run plugin-data, or return None when it is unavailable."""
+    if not os.path.exists(PLUGIN_DATA):
+        return None
+    try:
+        r = subprocess.run([PLUGIN_DATA] + list(args) + list(extra),
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def pull_state(path):
+    """Seed the local cache from the worker when this machine has no copy."""
+    if os.path.exists(path):
+        return
+    body = _remote(["get", _remote_key(path)])
+    if not body:
+        return
+    try:
+        json.loads(body)
+    except ValueError:
+        return                                  # not our file; leave it alone
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(body)
+    sys.stderr.write("restored import ledger from plugin-data: %s\n"
+                     % _remote_key(path))
+
+
+def publish_state(path):
+    """Push the finished ledger to the worker so other machines can see it."""
+    if not os.path.exists(path):
+        return
+    if _remote(["put", _remote_key(path), path]) is None:
+        sys.stderr.write(
+            "warning: could not publish the import ledger to plugin-data; "
+            "the local copy at %s is the only one.\n" % path)
 
 
 # --------------------------------------------------------------- helpers
 
 def load_state(path):
+    if path:
+        pull_state(path)
     if path and os.path.exists(path):
         return json.load(open(path))
     return {"done": {}, "failed": {}}
@@ -205,6 +260,7 @@ def cmd_import(args):
 
     if not args.dry_run:
         save_state(state_path, state)
+        publish_state(state_path)
     if live and args.prune_backups:
         _prune_backups(backups_before)
 

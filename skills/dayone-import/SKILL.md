@@ -109,9 +109,19 @@ other devices. `sync-journals` is a read-only audit and instruction command.
 - **The staging journal must already exist** in Journal.app. Give it a name
   distinct from the final journal, for example `Day One - Photography`.
 - **Quit Journal.app** before a live run; `journal-cli` refuses while it runs.
-- **Resumable.** Progress is kept in `~/.local/state/dayone-import/<journal>.json`
-  keyed by Day One UUID, so a re-run skips what already landed and never
-  double-writes. Delete that file to force a full re-import.
+- **Resumable.** Progress is kept in an import ledger keyed by Day One UUID,
+  so a re-run skips what already landed and never double-writes. Delete the
+  ledger to force a full re-import.
+
+  Nothing can regenerate a ledger, and `fix-text` / `fix-locations` need it
+  months later to know which entries are theirs. So the durable copy lives in
+  the Plugin Data Worker under `journal-cli/dayone-import/`, with a local
+  cache at `~/.local/state/dayone-import/` (override with
+  `$DAYONE_IMPORT_STATE`). The cache is authoritative during a run -- writing
+  over the network every few entries would stall a large import -- and is
+  published when the import finishes. A machine with no local copy pulls it
+  back automatically. If the worker is unreachable the import still runs and
+  says the local copy is the only one.
 - **`--prune-backups`** is close to required for big journals. `journal-cli`
   snapshots the whole store before *every* live write; over a few thousand
   entries that is tens of GB of near-identical copies. This retires them to
