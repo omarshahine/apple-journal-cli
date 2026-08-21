@@ -107,6 +107,22 @@ _LINK = re.compile(r'\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
 _CODE_FENCE = re.compile(r"(?m)^[ \t]*```[^\n]*$")
 
 
+def markdown_to_inline_text(md):
+    """Flatten a single-line field such as a title.
+
+    Block rules must not apply: a first line of "---" is a title, not a
+    horizontal rule, and "1. first" is a title, not a list item. Mirrors
+    journal-cli's `render --inline`.
+    """
+    if not md:
+        return md
+    out = _LINK.sub(lambda m: m.group(2) if m.group(1).strip() in ("", m.group(2))
+                    else "%s (%s)" % (m.group(1), m.group(2)), md)
+    out = _BOLD_ITALIC.sub(lambda m: m.group(2), out)
+    out = _ESCAPED.sub(r"\1", out)
+    return out.strip()
+
+
 def markdown_to_text(md):
     """Flatten Day One markdown into what a plain-text reader should see."""
     if not md:
@@ -216,7 +232,7 @@ def read_entries(con, journal_pk, media=None):
         # Journal's rich text, so headings survive as real bold rather than
         # being flattened here.
         title_md, body_md = title, body
-        title = markdown_to_text(title) or None
+        title = markdown_to_inline_text(title) or None
         body = markdown_to_text(body)
 
         tz = timezone_name(e["ZTIMEZONE"])

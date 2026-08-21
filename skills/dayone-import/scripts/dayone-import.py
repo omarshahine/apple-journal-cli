@@ -209,6 +209,9 @@ def cmd_import(args):
 # journal-cli snapshots the whole store before every live write; across a
 # few thousand entries that is tens of GB of near-identical copies. Keep the
 # ones that predate this run, retire the rest to the Trash (never rm).
+_PRUNE_WARNED = False
+
+
 def _backup_dirs():
     root = os.path.expanduser("~/Backups/journal-cli")
     if not os.path.isdir(root):
@@ -221,11 +224,19 @@ def _prune_backups(keep):
     stale = made[:-1]                       # always keep the most recent
     if not stale:
         return
-    if shutil.which("trash"):
-        subprocess.run(["trash"] + stale, capture_output=True)
-    else:
-        for d in stale:
-            shutil.rmtree(d, ignore_errors=True)
+    if not shutil.which("trash"):
+        # These are the only copies of the store from before each write.
+        # Retiring them to the Trash is recoverable; deleting them is not, so
+        # rather than quietly destroying backups, leave them and say so.
+        global _PRUNE_WARNED
+        if not _PRUNE_WARNED:
+            _PRUNE_WARNED = True
+            sys.stderr.write(
+                "warning: `trash` is unavailable (macOS 26+), so backup "
+                "snapshots are being kept rather than deleted. Remove "
+                "~/Backups/journal-cli yourself if disk space runs short.\n")
+        return
+    subprocess.run(["trash"] + stale, capture_output=True)
 
 
 def _haversine(a, b, c, d):
