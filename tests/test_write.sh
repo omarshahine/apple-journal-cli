@@ -170,6 +170,56 @@ ok "hard: entry gone" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO whe
 ok "hard: assets gone" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$MPK;")" "0"
 ok "hard: files removed" "$([ -d "$ATT/$EUUID" ] && echo yes || echo no)" "no"
 
+echo "T9 resize"
+BIG="$SB/big.png"
+python3 - "$BIG" <<'PZ'
+import sys,zlib,struct
+W,H=4000,3000
+def chunk(t,d): return struct.pack(">I",len(d))+t+d+struct.pack(">I",zlib.crc32(t+d)&0xffffffff)
+raw=b"".join(b"\x00"+bytes([120,140,160])*W for _ in range(H))
+png=(b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR",struct.pack(">IIBBBBB",W,H,8,2,0,0,0))
+     +chunk(b"IDAT",zlib.compress(raw,1))+chunk(b"IEND",b""))
+open(sys.argv[1],"wb").write(png)
+PZ
+ZOUT=$("$CLI" --db "$DB" write --body "Big image." --media "$BIG" 2>&1)
+ZPK=$(echo "$ZOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ZF=$("$CLI" --db "$DB" show $ZPK --json | jq_ 'd["assets"][0]["files"][0]["path"]')
+ZW=$(sips -g pixelWidth "$ZF" 2>/dev/null | awk '/pixelWidth/{print $2}')
+ok "big image downscaled to Journal cap" "$ZW" "2830"
+NOUT=$("$CLI" --db "$DB" write --body "Big image raw." --media "$BIG" --no-resize 2>&1)
+NPK=$(echo "$NOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+NF=$("$CLI" --db "$DB" show $NPK --json | jq_ 'd["assets"][0]["files"][0]["path"]')
+NW=$(sips -g pixelWidth "$NF" 2>/dev/null | awk '/pixelWidth/{print $2}')
+ok "--no-resize keeps original size" "$NW" "4000"
+SOUT=$("$CLI" --db "$DB" write --body "Small image." --media "$IMG" 2>&1)
+SPK=$(echo "$SOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+SF=$("$CLI" --db "$DB" show $SPK --json | jq_ 'd["assets"][0]["files"][0]["path"]')
+SW=$(sips -g pixelWidth "$SF" 2>/dev/null | awk '/pixelWidth/{print $2}')
+ok "small image untouched" "$SW" "4"
+"$CLI" --db "$DB" delete $ZPK --hard >/dev/null 2>&1
+"$CLI" --db "$DB" delete $NPK --hard >/dev/null 2>&1
+"$CLI" --db "$DB" delete $SPK --hard >/dev/null 2>&1
+
+echo "T10 live photo"
+LPOUT=$("$CLI" --db "$DB" write --body "Live one." --live-photo "$IMG" "$MOV" 2>&1)
+LPPK=$(echo "$LPOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ok "livePhoto asset" "$(sqlite3 "$DB" "select ZASSETTYPE from ZJOURNALENTRYASSETMO where ZENTRY=$LPPK;")" "livePhoto"
+ok "two file rows on one asset" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETFILEATTACHMENTMO fa join ZJOURNALENTRYASSETMO a on a.Z_PK=fa.ZASSET where a.ZENTRY=$LPPK;")" "2"
+ok "names image+video" "$(sqlite3 "$DB" "select group_concat(fa.ZNAME) from (select ZNAME from ZJOURNALENTRYASSETFILEATTACHMENTMO fa2 join ZJOURNALENTRYASSETMO a on a.Z_PK=fa2.ZASSET where a.ZENTRY=$LPPK order by fa2.ZNAME) fa;")" "image,video"
+ok "both index 0" "$(sqlite3 "$DB" "select group_concat(distinct fa.ZINDEX) from ZJOURNALENTRYASSETFILEATTACHMENTMO fa join ZJOURNALENTRYASSETMO a on a.Z_PK=fa.ZASSET where a.ZENTRY=$LPPK;")" "0"
+ok "plain filenames (no _resized)" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETFILEATTACHMENTMO fa join ZJOURNALENTRYASSETMO a on a.Z_PK=fa.ZASSET where a.ZENTRY=$LPPK and fa.ZFILEPATH like '%_resized%';")" "0"
+"$CLI" --db "$DB" write --body x --live-photo "$MOV" "$IMG" >/dev/null 2>&1
+ok "wrong pair order rejected" "$?" "1"
+"$CLI" --db "$DB" delete $LPPK --hard >/dev/null 2>&1
+
+echo "T11 photos-link path heuristic"
+PL="$SB/fake.photoslibrary/originals/A/AABBCCDD-1111-2222-3333-444455556666.jpg"
+mkdir -p "$(dirname "$PL")"; cp "$IMG" "$PL" 2>/dev/null || sips -s format jpeg "$IMG" --out "$PL" >/dev/null 2>&1
+PLOUT=$("$CLI" --db "$DB" write --body "Linked." --media "$PL" --photos-link 2>&1)
+PLPK=$(echo "$PLOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ok "assetIdentifier written" "$("$CLI" --db "$DB" show $PLPK --json >/dev/null 2>&1; sqlite3 "$DB" "select instr(ZASSETMETADATA,'AABBCCDD-1111-2222-3333-444455556666/L0/001')>1 from ZJOURNALENTRYASSETMO where ZENTRY=$PLPK;")" "1"
+"$CLI" --db "$DB" delete $PLPK --hard >/dev/null 2>&1
+
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"
 SEEDCOUNT=$(sqlite3 "${JOURNAL_SEED:-$DB}" 'select count(*) from ZJOURNALENTRYMO;' 2>/dev/null)

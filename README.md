@@ -67,8 +67,14 @@ Writing is opt-in and guarded. Against the real store, `journal-cli`:
 journal-cli write --live --title "Monday" --body "Long run, then coffee."
 cat notes.md | journal-cli write --live --title "Notes"
 
-# photos and video
+# photos and video (images are downscaled to Journal's own ~6MP cap; --no-resize to skip)
 journal-cli write --live --body "Beach day" --media ~/Pictures/a.heic ~/Movies/b.mov
+
+# a Live Photo is an image + video pair
+journal-cli write --live --body "Golden hour" --live-photo IMG_0123.heic IMG_0123.mov
+
+# link media back to the Photos library (writes assetIdentifier via Photos.sqlite lookup)
+journal-cli write --live --body "..." --media IMG_0079.JPG --photos-link
 
 # location pin
 journal-cli write --live --body "At the office" \
@@ -166,7 +172,7 @@ Journal stores twelve asset types. This tool writes three:
 |---|---|---|
 | `photo` | 267 | read + write |
 | `streakEvent` | 208 | read metadata only |
-| `livePhoto` | 89 | read metadata only |
+| `livePhoto` | 89 | read + write |
 | `multiPinMap` (location) | 85 | read + write |
 | `video` | 31 | read + write |
 | `stateOfMind` | 6 | read metadata only |
@@ -203,11 +209,13 @@ Beyond assets:
 
 ### Known limits on what is supported
 
-- Photos are copied as-is. Journal's own `_resized` files are downscaled
-  derivatives; no resizing is performed here.
-- No Photos-library linkage. Real photo assets carry an `assetIdentifier`
-  pointing into the Photos database; written ones do not, so a written photo
-  will not deep-link back to Photos.
+- Images are downscaled to Journal's own ~6MP `_resized` cap (long edge 2830)
+  unless `--no-resize` is passed; Live Photo pairs are stored untouched, as
+  Journal does.
+- `--photos-link` resolves `assetIdentifier` by original filename (and size,
+  when the name is ambiguous) against `Photos.sqlite`, or from the UUID when
+  the file comes straight out of a `.photoslibrary`. Files Photos does not
+  know about are attached unlinked, with a warning.
 - Deleting a synced row is only partly verified. Locally it is clean and the
   entry does not come back after a resync, but whether the CloudKit record is
   tombstoned or merely orphaned was not confirmed, and other devices were not
@@ -222,10 +230,11 @@ tests/test_write.sh                                   # seeds from the live stor
 JOURNAL_SEED=~/Backups/journal-cli/<ts>/moments.sqlite tests/test_write.sh
 ```
 
-72 assertions against a throwaway copy: argument guards, insert bookkeeping,
+82 assertions against a throwaway copy: argument guards, insert bookkeeping,
 RTF round-trip, location metadata and coordinates, photo/video asset rows,
 attachment file layout on disk, asset ordering, Markdown export of media and
-locations, every `edit` operation (including media removal) and its CRDT guard, soft and hard delete, `PRAGMA integrity_check`, and a check that the
+locations, every `edit` operation (including media removal) and its CRDT guard, image
+resizing, Live Photo pairing, Photos-library linkage, soft and hard delete, `PRAGMA integrity_check`, and a check that the
 source store never moved.
 
 `JOURNAL_SEED` runs the whole suite off a backup, so tests need no Full Disk

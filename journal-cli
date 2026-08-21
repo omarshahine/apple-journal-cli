@@ -155,6 +155,67 @@ def txt_to_rtf(text):
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- media helpers
+
+RESIZE_MAX = 2830   # long edge of Journal's own _resized derivatives (~6MP)
+
+def image_dims(path):
+    try:
+        out = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
+                             capture_output=True, text=True, timeout=30).stdout
+        w = h = 0
+        for l in out.splitlines():
+            if "pixelWidth" in l: w = int(l.split()[-1])
+            if "pixelHeight" in l: h = int(l.split()[-1])
+        return w, h
+    except Exception:
+        return 0, 0
+
+def resize_into(src, dst):
+    """Copy src to dst, downscaling to RESIZE_MAX long edge like Journal does."""
+    w, h = image_dims(src)
+    if max(w, h) > RESIZE_MAX:
+        r = subprocess.run(["sips", "-Z", str(RESIZE_MAX), src, "--out", dst],
+                           capture_output=True, timeout=120)
+        if r.returncode == 0 and os.path.exists(dst):
+            return True
+    shutil.copy2(src, dst)
+    return False
+
+PHOTOS_DB = os.path.expanduser("~/Pictures/Photos Library.photoslibrary/database/Photos.sqlite")
+
+def photos_lookup(path):
+    """Best-effort PHAsset localIdentifier ('UUID/L0/001') for a media file."""
+    stem, _ = os.path.splitext(os.path.basename(path))
+    # exported straight out of the library: originals/<x>/<UUID>.ext
+    if ".photoslibrary/" in path:
+        try:
+            uuid.UUID(stem)
+            return f"{stem.upper()}/L0/001"
+        except ValueError:
+            pass
+    if not os.path.exists(PHOTOS_DB):
+        return None
+    try:
+        c = sqlite3.connect(f"file:{PHOTOS_DB.replace(' ', '%20')}?mode=ro&immutable=1", uri=True)
+        rows = c.execute("""select a.ZUUID, aa.ZORIGINALFILESIZE
+                            from ZASSET a
+                            join ZADDITIONALASSETATTRIBUTES aa on aa.ZASSET=a.Z_PK
+                            where aa.ZORIGINALFILENAME=?""",
+                         (os.path.basename(path),)).fetchall()
+        c.close()
+    except Exception:
+        return None
+    if len(rows) == 1:
+        return f"{rows[0][0]}/L0/001"
+    if len(rows) > 1 and os.path.exists(path):
+        size = os.path.getsize(path)
+        hits = [r for r in rows if r[1] == size]
+        if len(hits) == 1:
+            return f"{hits[0][0]}/L0/001"
+    return None
+
+
 # ---------------------------------------------------------------- metadata blobs
 
 def meta_blob(obj):
@@ -371,7 +432,8 @@ def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0):
          cd_now(), meta_blob(metadata) if metadata is not None else None, slim))
     return pk, au
 
-def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index):
+def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index,
+             resize=True, plain_name=False):
     ext = os.path.splitext(src_path)[1].lower()
     if ext in VIDEO_EXT: name = "video"
     elif ext in PHOTO_EXT: name = "image"
@@ -379,8 +441,12 @@ def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index):
     rel_dir = os.path.join(entry_uuid, asset_uuid)
     abs_dir = os.path.join(attach_dir(), rel_dir)
     os.makedirs(abs_dir, exist_ok=True)
-    fname = f"{uid()}_resized{ext}"
-    shutil.copy2(src_path, os.path.join(abs_dir, fname))
+    fname = f"{uid()}{ext}" if plain_name else f"{uid()}_resized{ext}"
+    dst = os.path.join(abs_dir, fname)
+    if name == "image" and resize:
+        resize_into(src_path, dst)
+    else:
+        shutil.copy2(src_path, dst)
     ent, pk = next_pk(conn, "file")
     conn.execute("""
         insert into ZJOURNALENTRYASSETFILEATTACHMENTMO
@@ -398,11 +464,20 @@ def cmd_write(a):
     media = [os.path.abspath(os.path.expanduser(m)) for m in (a.media or [])]
     for m in media:
         if not os.path.exists(m): die(f"media file not found: {m}")
+    lp = None
+    if a.live_photo:
+        lp = [os.path.abspath(os.path.expanduser(x)) for x in a.live_photo]
+        img_ext = os.path.splitext(lp[0])[1].lower()
+        mov_ext = os.path.splitext(lp[1])[1].lower()
+        if img_ext not in PHOTO_EXT or mov_ext not in VIDEO_EXT:
+            die("--live-photo takes IMAGE then VIDEO (e.g. IMG.heic IMG.mov)")
+        for x in lp:
+            if not os.path.exists(x): die(f"live-photo file not found: {x}")
     has_loc = a.lat is not None or a.lon is not None
     if has_loc and (a.lat is None or a.lon is None):
         die("--lat and --lon must be given together")
-    if not (body and body.strip()) and not media and not has_loc:
-        die("nothing to write (need --body/--body-file/stdin, --media, or --lat/--lon)")
+    if not (body and body.strip()) and not media and not lp and not has_loc:
+        die("nothing to write (need --body/--body-file/stdin, --media, --live-photo, or --lat/--lon)")
     body = body or ""
 
     when = parse_date(a.date) if a.date else datetime.datetime.now()
@@ -426,16 +501,32 @@ def cmd_write(a):
              rtf, title_rtf, len(body), 1 if a.title else 0, 1 if a.bookmark else 0))
 
         ordering = []
-        for i, m in enumerate(media):
+        idx = 0
+        for m in media:
             ext = os.path.splitext(m)[1].lower()
             atype = "video" if ext in VIDEO_EXT else "photo"
             meta = {"date": ts}
             if has_loc:
                 meta.update({"latitude": a.lat, "longitude": a.lon})
                 if a.place: meta["placeName"] = a.place
+            if a.photos_link:
+                aid = photos_lookup(m)
+                if aid: meta["assetIdentifier"] = aid
+                else: print(f"warning: no Photos-library match for {os.path.basename(m)}",
+                            file=sys.stderr)
             apk, au = add_asset(conn, pk, entry_uuid, atype, "imagePicker", meta)
-            add_file(conn, apk, au, entry_uuid, m, 0)
-            ordering += [au, i]
+            add_file(conn, apk, au, entry_uuid, m, 0, resize=not a.no_resize)
+            ordering += [au, idx]; idx += 1
+
+        if lp:
+            meta = {"date": ts}
+            if a.photos_link:
+                aid = photos_lookup(lp[0])
+                if aid: meta["assetIdentifier"] = aid
+            apk, au = add_asset(conn, pk, entry_uuid, "livePhoto", "imagePicker", meta)
+            add_file(conn, apk, au, entry_uuid, lp[0], 0, resize=False, plain_name=True)
+            add_file(conn, apk, au, entry_uuid, lp[1], 0, resize=False, plain_name=True)
+            ordering += [au, idx]; idx += 1
 
         if has_loc:
             visit = {"latitude": a.lat, "longitude": a.lon,
@@ -446,7 +537,7 @@ def cmd_write(a):
             if a.city:  visit["city"] = a.city
             _, au = add_asset(conn, pk, entry_uuid, "multiPinMap", "locationPicker",
                               {"revision": 2, "visitsData": [visit]}, slim=1)
-            ordering += [au, len(media)]
+            ordering += [au, idx]
 
         if ordering:
             conn.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",
@@ -454,6 +545,7 @@ def cmd_write(a):
 
     bits = [f"{len(body)} chars"] if body.strip() else []
     if media: bits.append(f"{len(media)} media")
+    if lp: bits.append("1 live photo")
     if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
     print(f"Created entry {pk} ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}.")
 
@@ -571,8 +663,14 @@ def cmd_edit(a):
         for m in media:
             ext = os.path.splitext(m)[1].lower()
             atype = "video" if ext in VIDEO_EXT else "photo"
-            apk, au = add_asset(conn, a.id, entry_uuid, atype, "imagePicker", {"date": cd_now()})
-            add_file(conn, apk, au, entry_uuid, m, 0)
+            meta = {"date": cd_now()}
+            if a.photos_link:
+                aid = photos_lookup(m)
+                if aid: meta["assetIdentifier"] = aid
+                else: print(f"warning: no Photos-library match for {os.path.basename(m)}",
+                            file=sys.stderr)
+            apk, au = add_asset(conn, a.id, entry_uuid, atype, "imagePicker", meta)
+            add_file(conn, apk, au, entry_uuid, m, 0, resize=not a.no_resize)
             added.append(au)
 
         if has_loc:
@@ -690,6 +788,12 @@ def main():
     w.add_argument("--title"); w.add_argument("--body"); w.add_argument("--body-file")
     w.add_argument("--date"); w.add_argument("--bookmark", action="store_true")
     w.add_argument("--media", nargs="+", metavar="PATH", help="photos or videos to attach")
+    w.add_argument("--live-photo", nargs=2, metavar=("IMAGE", "VIDEO"),
+                   help="attach a Live Photo as an image + video pair")
+    w.add_argument("--photos-link", action="store_true",
+                   help="link media back to the Photos library (assetIdentifier)")
+    w.add_argument("--no-resize", action="store_true",
+                   help="copy images as-is instead of downscaling to Journal's ~6MP")
     w.add_argument("--lat", type=float); w.add_argument("--lon", type=float)
     w.add_argument("--place", help="place name for the location pin")
     w.add_argument("--city")
@@ -703,6 +807,8 @@ def main():
     ed.add_argument("--bookmark", action="store_true")
     ed.add_argument("--no-bookmark", action="store_true")
     ed.add_argument("--add-media", nargs="+", metavar="PATH")
+    ed.add_argument("--photos-link", action="store_true")
+    ed.add_argument("--no-resize", action="store_true")
     ed.add_argument("--remove-media", nargs="+", type=int, metavar="ASSET_ID",
                     help="remove media assets by id (ids shown in `show <id>`)")
     ed.add_argument("--remove-all-media", action="store_true")
