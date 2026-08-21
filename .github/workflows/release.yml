@@ -127,16 +127,24 @@ jobs:
           node-version: 24
           registry-url: "https://registry.npmjs.org"
 
-      - name: Publish to npm (OIDC trusted publishing)
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          # First-time publish cannot use OIDC: the package must exist with this
-          # repo configured as its trusted publisher on npmjs.com. Until then,
-          # warn and skip so the rest of the release stays green.
-          if ! npm view apple-journal-cli version >/dev/null 2>&1; then
-            echo "::warning::apple-journal-cli does not exist on npm yet. Do the one-time first publish (npm login; cd npm && npm publish --access public), configure this repo as a trusted publisher on npmjs.com, and future tags will publish automatically."
+          # Steady state: OIDC trusted publishing (no token). First-time
+          # bootstrap: OIDC cannot create a package, so if the package does not
+          # exist yet, fall back to the NPM_TOKEN secret when present; once the
+          # package exists and this repo is configured as its trusted publisher
+          # on npmjs.com, the token secret can be deleted.
+          cd npm
+          if npm view apple-journal-cli version >/dev/null 2>&1; then
+            npm publish --provenance --access public
+          elif [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "First publish of apple-journal-cli via NPM_TOKEN."
+            npm publish --access public
+          else
+            echo "::warning::apple-journal-cli does not exist on npm yet and no NPM_TOKEN secret is set. Add a granular npm token as the NPM_TOKEN repo secret (or configure trusted publishing after a first publish) and re-run."
             exit 0
           fi
-          cd npm
-          npm publish --provenance --access public
           npm view apple-journal-cli version
