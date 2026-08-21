@@ -1,6 +1,6 @@
 {
   "name": "apple-journal-cli",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "Read and write Apple Journal entries from the terminal. Native Swift binary; macOS only.",
   "keywords": [
     "apple",

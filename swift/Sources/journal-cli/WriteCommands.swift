@@ -1,6 +1,24 @@
 // WriteCommands.swift — write, edit, delete, restore, empty, sandbox.
 import Foundation
 
+// Journal stores entry text as RTF and renders its formatting, so callers
+// that already have styled text can hand it over verbatim instead of having
+// it flattened through textToRTF.
+private func readBodyRTF(_ a: Args) -> (data: Data, plain: String)? {
+    // Markdown is rendered into Journal's own rich text; Journal shows no
+    // Markdown syntax, so leaving it in place would print it literally.
+    if a.has("--markdown"), let md = readBody(a) { return markdownToRTF(md) }
+    guard let path = a.value("--body-rtf") else { return nil }
+    let full = (path as NSString).expandingTildeInPath
+    guard let d = FileManager.default.contents(atPath: full) else {
+        die("cannot read --body-rtf file: \(path)")
+    }
+    guard let att = NSAttributedString(rtf: d, documentAttributes: nil) else {
+        die("--body-rtf is not valid RTF: \(path)")
+    }
+    return (d, att.string)
+}
+
 private func readBody(_ a: Args) -> String? {
     if let b = a.value("--body") { return b }
     if let f = a.value("--body-file") {
@@ -21,7 +39,8 @@ private func readBody(_ a: Args) -> String? {
 }
 
 func cmdWrite(_ a: Args) {
-    let body = readBody(a) ?? ""
+    let rtfBody = readBodyRTF(a)
+    let body = rtfBody?.plain ?? (readBody(a) ?? "")
     let media = a.values("--media").map { (($0 as NSString).expandingTildeInPath as NSString).standardizingPath }
     for m in media where !FileManager.default.fileExists(atPath: m) {
         die("media file not found: \(m)")
@@ -51,7 +70,7 @@ func cmdWrite(_ a: Args) {
     let when = a.value("--date").map(parseDate) ?? Date()
     let ts = cd(when)
     let entryUUID = uid()
-    let title = a.value("--title")
+    let title = a.value("--title").map { a.has("--markdown") ? markdownToPlain($0) : $0 }
 
     if a.has("--dry-run") {
         var bits: [String] = []
@@ -77,7 +96,7 @@ func cmdWrite(_ a: Args) {
                ZMINIMUMSUPPORTEDAPPVERSION, ZMINIMUMSUPPORTEDAPPVERSIONMODE)
             values (?,?,1,'blankEntry',?, ?,?,?,?, ?,?,?,?, 0,?,0,0, 0,0,0, 0,0)
             """, [pk, ent, uidBytes(entryUUID), ts, cdNow(), cdNow(), ts,
-                  hasText ? textToRTF(body) : nil,
+                  hasText ? (rtfBody?.data ?? textToRTF(body)) : nil,
                   title.map(textToRTF),
                   body.count, title != nil ? 1 : 0,
                   a.has("--bookmark") ? 1 : 0])
@@ -166,9 +185,10 @@ func cmdWrite(_ a: Args) {
 }
 
 func cmdEdit(_ a: Args) {
+    let rtfBody = readBodyRTF(a)
     guard let idStr = a.positional.first, let pk = Int64(idStr) else { die("edit needs an entry id") }
-    let body = readBody(a)
-    let title = a.value("--title")
+    let body = rtfBody?.plain ?? readBody(a)
+    let title = a.value("--title").map { a.has("--markdown") ? markdownToPlain($0) : $0 }
     let media = a.values("--add-media").map { (($0 as NSString).expandingTildeInPath as NSString).standardizingPath }
     for m in media where !FileManager.default.fileExists(atPath: m) {
         die("media file not found: \(m)")
@@ -211,9 +231,9 @@ func cmdEdit(_ a: Args) {
         var sets: [String] = []
         var vals: [Any?] = []
         if let b = body {
+            let blank = b.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             sets += ["ZTEXT=?", "ZTEXTLENGTH=?"]
-            vals += [b.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : textToRTF(b),
-                     b.count]
+            vals += [blank ? nil : (rtfBody?.data ?? textToRTF(b)), b.count]
         }
         if let t = title {
             let empty = t.trimmingCharacters(in: .whitespaces).isEmpty

@@ -101,6 +101,9 @@ journal-cli write --live --body "At the office" \
 # web link (renders as a rich link card)
 journal-cli write --live --body "Read this" --link https://example.com --link-title "A Post"
 
+# markdown -> Journal's own rich text (bold, italic, lists, strikethrough)
+journal-cli write --live --markdown --body-file entry.md
+
 # target a journal; link photos back to the Photos library
 journal-cli write --live --journal "Travel" --body "..." --media IMG_0079.JPG --photos-link
 ```
@@ -154,6 +157,10 @@ Two more things it knows:
 - **Day One keeps media cloud-only** until asked. A journal can look complete
   in the app while almost nothing is on disk. `plan` reports the shortfall
   before you import anything.
+- **Day One writes Markdown, Journal renders rich text.** Entries are
+  converted with `--markdown`, so headings become bold, `- ` and `1. ` become
+  real lists, and Day One's `\.` escaping disappears instead of showing up
+  literally. `fix-text` re-renders entries imported before this existed.
 
 Imports are resumable, keyed by Day One's entry UUIDs, so re-running never
 double-writes.

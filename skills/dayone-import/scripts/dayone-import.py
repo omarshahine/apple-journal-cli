@@ -5,7 +5,6 @@ Subcommands:
   journals                       list Day One journals and entry counts
   plan     <journal>             what would be imported, and what can't be
   import   <journal>             write the entries via journal-cli
-  fix-locations <journal>        correct imported locations from photo EXIF
   fix-export <journal> <dir>     repair a Day One markdown export in place
 
 Why this exists: Day One's markdown export silently renders every timestamp
@@ -14,7 +13,7 @@ hours -- sometimes a whole day -- off. Day One's SQLite store still has the
 original zone per entry, so this reads that directly and uses the export
 folder only as a source of image bytes.
 """
-import os, re, sys, json, shutil, argparse, subprocess, datetime
+import os, re, sys, json, shutil, sqlite3, argparse, collections, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dayone, exifgps, photoslib
@@ -141,10 +140,15 @@ def cmd_import(args):
         cmd += ["write", "--journal", target]
         when = e["utc"] if args.time_mode == "utc" else e["local"]
         cmd += ["--date", when]
+        # Hand over the raw markdown: journal-cli --markdown renders it into
+        # Journal's rich text, so headings and emphasis become real formatting
+        # instead of literal "###### " in the finished entry.
         if e["title"]:
-            cmd += ["--title", e["title"]]
+            cmd += ["--title", e.get("title_md") or e["title"]]
         if e["body"]:
-            cmd += ["--body", e["body"]]
+            cmd += ["--body", e.get("body_md") or e["body"]]
+        if e["title"] or e["body"]:
+            cmd += ["--markdown"]
         if e["starred"]:
             cmd += ["--bookmark"]
         if e["lat"] is not None and e["lon"] is not None:
@@ -352,6 +356,146 @@ def cmd_fix_locations(args):
         else:
             ok += 1
     print("\nRelocated %d of %d." % (ok, len(fixes)))
+
+
+ARTIFACTS = [
+    re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+"),          # ###### heading
+    re.compile(r"\\[\\`*_{}\[\]()#+\-.!>~|]"),           # \. \- escaping
+    re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,})[ \t]*$"),   # --- rule
+    re.compile(r"\*\*\S.*?\S\*\*"),                       # **bold**
+    re.compile(r"\[[^\]]+\]\([^)\s]+\)"),                 # [text](url)
+]
+
+
+# Constructs in the Day One source that must survive as real formatting.
+SOURCE_FEATURES = {
+    "bold": re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+\S|\*\*\S.*?\S\*\*"),
+    "list": re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]+\S"),
+    "italic": re.compile(r"(?<![\w*])\*(?=\S)[^*\n]+?(?<=\S)\*(?![\w*])"),
+    "strike": re.compile(r"~~\S.*?\S~~"),
+}
+# ...and the RTF markup each one produces.
+RTF_MARKERS = {
+    "bold": "Bold",
+    "list": "listtext",
+    "italic": "\\i ",
+    "strike": "\\strike",
+}
+
+
+def _stored(cli, target_db):
+    """pk -> (title, plain text, raw RTF) for entries currently in the store.
+
+    The RTF matters: an entry can read correctly as plain text while still
+    having lost the bold and list markup its source called for.
+    """
+    cmd = [cli]
+    if target_db:
+        cmd += ["--db", target_db]
+    cmd += ["list", "--limit", "100000", "--full", "--include-empty", "--json"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        die("could not list entries: %s" % r.stderr.strip())
+    text = {e["id"]: (e.get("title") or "", e.get("text") or "")
+            for e in json.loads(r.stdout)}
+
+    db = target_db or os.path.expanduser(
+        "~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite")
+    rtf = {}
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        for pk, blob in con.execute(
+                "select Z_PK, ZTEXT from ZJOURNALENTRYMO where ZTEXT is not null"):
+            rtf[pk] = (blob.decode("utf-8", "replace")
+                       if isinstance(blob, (bytes, bytearray)) else str(blob))
+        con.close()
+    except sqlite3.Error:
+        pass                       # fall back to plain-text checks only
+    return {pk: (t[0], t[1], rtf.get(pk, "")) for pk, t in text.items()}
+
+
+def cmd_fix_text(args):
+    """Re-render entries whose text still carries raw Markdown syntax.
+
+    Early imports wrote Day One's markdown through as plain text, so headings
+    and escapes ended up visible. This rewrites those entries from the
+    original markdown using journal-cli --markdown.
+    """
+    j, entries = gather(args)
+    state_path = args.state or os.path.join(
+        STATE_DIR, re.sub(r"\W+", "_", j["name"]) + ".json")
+    state = load_state(state_path)
+    if not state["done"]:
+        die("no import state at %s -- run `import` first" % state_path)
+
+    stored = _stored(args.cli, args.target_db)
+    todo, reasons = [], collections.Counter()
+    for e in entries:
+        pk = state["done"].get(e["uuid"])
+        if not isinstance(pk, int) or pk not in stored:
+            continue
+        title, text, rtf = stored[pk]
+        why = None
+        if any(p.search(title + "\n" + text) for p in ARTIFACTS):
+            why = "raw markdown visible"
+        else:
+            source = (e.get("title_md") or "") + "\n" + (e.get("body_md") or "")
+            for name, pat in SOURCE_FEATURES.items():
+                if pat.search(source) and RTF_MARKERS[name] not in rtf:
+                    why = "lost %s formatting" % name
+                    break
+        if why:
+            reasons[why] += 1
+            todo.append((e, pk))
+
+    print("%d of %d imported entries need re-rendering."
+          % (len(todo), len(state["done"])))
+    for why, n in reasons.most_common():
+        print("   %4d  %s" % (n, why))
+    if not todo:
+        return
+    for e, pk in todo[:5]:
+        before = stored[pk][1].split("\n")[0][:64]
+        print("   [%s] %s" % (pk, before or stored[pk][0][:64]))
+    if len(todo) > 5:
+        print("   ... and %d more" % (len(todo) - 5))
+    if args.dry_run:
+        print("\nDRY RUN: nothing written.")
+        return
+
+    ok = fail = 0
+    for n, (e, pk) in enumerate(todo, 1):
+        cmd = [args.cli]
+        if args.target_db:
+            cmd += ["--db", args.target_db]
+        cmd += ["edit", str(pk), "--markdown"]
+        title_md = e.get("title_md") or e["title"]
+        # Drive off the raw markdown, not the rendered text: a body that is
+        # only a "---" rule renders to nothing and must be cleared, which a
+        # truthiness check on the rendered text would skip.
+        body_md = e.get("body_md")
+        if body_md is None:
+            body_md = e["body"]
+        if title_md:
+            cmd += ["--title", title_md]
+        if body_md is not None and (body_md != "" or e["body"] == ""):
+            cmd += ["--body", body_md]
+        if not title_md and not body_md:
+            continue
+        if not args.target_db:
+            cmd += ["--live", "--accept-risk"]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            fail += 1
+            sys.stderr.write("  entry %s FAILED: %s\n"
+                             % (pk, (r.stderr or r.stdout).strip().split("\n")[-1]))
+            if fail >= args.max_failures:
+                die("stopping after %d failures" % fail)
+        else:
+            ok += 1
+        if n % 100 == 0:
+            print("   %d/%d" % (n, len(todo)))
+    print("\nRewrote %d, failed %d." % (ok, fail))
 
 
 # ------------------------------------------------------------- fix-export
@@ -586,6 +730,17 @@ def main():
                         "library has no matching asset to corroborate them")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_fix_locations)
+
+    s = sub.add_parser("fix-text",
+                       help="re-render imported entries that still show raw Markdown")
+    s.add_argument("journal")
+    s.add_argument("--export", help="markdown export dir (extra media source)")
+    s.add_argument("--target-db", help="operate on a sandbox store instead")
+    s.add_argument("--cli", default="journal-cli")
+    s.add_argument("--state", help="import state file to map entries by")
+    s.add_argument("--max-failures", type=int, default=5)
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(func=cmd_fix_text)
 
     s = sub.add_parser("fix-export",
                        help="repair timestamps in a Day One markdown export")
