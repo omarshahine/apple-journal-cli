@@ -12,6 +12,8 @@ private func readBody(_ a: Args) -> String? {
         let mode = st.st_mode & S_IFMT
         if mode == S_IFIFO || mode == S_IFREG {
             let d = FileHandle.standardInput.readDataToEndOfFile()
+            // an empty pipe/file (CI runners, `< /dev/null`-less shells) is no input
+            if d.isEmpty { return nil }
             return String(data: d, encoding: .utf8)
         }
     }

@@ -614,7 +614,7 @@ def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index,
 def cmd_write(a):
     body = a.body
     if a.body_file: body = open(a.body_file, errors="replace").read()
-    if body is None and stdin_has_data(): body = sys.stdin.read()
+    if body is None and stdin_has_data(): body = sys.stdin.read() or None
     media = [os.path.abspath(os.path.expanduser(m)) for m in (a.media or [])]
     for m in media:
         if not os.path.exists(m): die(f"media file not found: {m}")
@@ -772,7 +772,7 @@ def remove_assets(conn, entry_pk, entry_uuid, asset_pks):
 def cmd_edit(a):
     body = a.body
     if a.body_file: body = open(a.body_file, errors="replace").read()
-    if body is None and stdin_has_data(): body = sys.stdin.read()
+    if body is None and stdin_has_data(): body = sys.stdin.read() or None
 
     media = [os.path.abspath(os.path.expanduser(m)) for m in (a.add_media or [])]
     for m in media:
