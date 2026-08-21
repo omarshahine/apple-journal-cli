@@ -103,16 +103,59 @@ def backup(reason="write"):
     return d
 
 
+RISK_MARKER = os.path.expanduser("~/.config/journal-cli/risk-accepted")
+RISK_WARNING = """\
+================================ WARNING =====================================
+journal-cli writes DIRECTLY to Apple Journal's private, undocumented data
+store. Apple does not support this. A future macOS update can change the
+schema at any time, and a malformed write could corrupt entries or confuse
+iCloud sync across ALL your devices.
+
+Before your first live write:
+  1. BACK UP your journal in Journal.app:
+       Journal -> Settings -> Export Journal Entries...
+  2. Know that journal-cli also snapshots the local store to
+     ~/Backups/journal-cli/ before every live write -- but that cannot undo
+     anything that has already synced to iCloud.
+
+You use this tool AT YOUR OWN RISK.
+==============================================================================
+"""
+
+def ensure_risk_accepted(accept_flag):
+    if os.path.exists(RISK_MARKER):
+        return
+    def record():
+        os.makedirs(os.path.dirname(RISK_MARKER), exist_ok=True)
+        open(RISK_MARKER, "w").write(f"accepted {datetime.datetime.now()}\n")
+    print(RISK_WARNING, file=sys.stderr)
+    if accept_flag:
+        print("Risk accepted via --accept-risk.", file=sys.stderr)
+        record(); return
+    if sys.stdin.isatty():
+        try:
+            line = input('Type "I understand" to continue: ')
+        except EOFError:
+            line = ""
+        if line.strip().lower() == "i understand":
+            record(); return
+        die("not accepted; nothing was written")
+    die("first live write requires accepting the risk above.\n"
+        "  Re-run with --accept-risk (agents: ask the user before passing this).")
+
+
 class Live:
     """Read-write against the real store. Guarded."""
-    def __init__(self, allow_live_default=False):
+    def __init__(self, allow_live_default=False, accept_risk=False):
         self.is_default = os.path.realpath(DB) == os.path.realpath(DEFAULT_DB)
         self.allow = allow_live_default
+        self.accept = accept_risk
     def __enter__(self):
         if self.is_default:
             if not self.allow:
                 die("refusing to modify the real Journal store without --live.\n"
                     "  Test against a sandbox first:  journal-cli sandbox --dir DIR")
+            ensure_risk_accepted(self.accept)
             if journal_running():
                 die("Journal.app is running. Quit it first, then retry.")
             print(f"backup: {backup()}", file=sys.stderr)
@@ -641,7 +684,16 @@ def cmd_write(a):
     title_rtf = txt_to_rtf(a.title) if a.title else None
     entry_uuid = uid()
 
-    with Live(allow_live_default=a.live) as conn:
+    if a.dry_run:
+        bits = [f"{len(body)} chars"] if body.strip() else []
+        if media: bits.append(f"{len(media)} media")
+        if lp: bits.append("1 live photo")
+        if a.link: bits.append("1 link")
+        if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
+        if a.journal: bits.append(f"journal {a.journal!r}")
+        print(f"DRY RUN: would create entry ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}. Nothing written.")
+        return
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
         ent, pk = next_pk(conn, "entry")
         conn.execute("""
             insert into ZJOURNALENTRYMO
@@ -787,7 +839,14 @@ def cmd_edit(a):
                 a.date is not None, bookmark is not None]):
         die("nothing to change")
 
-    with Live(allow_live_default=a.live) as conn:
+    if a.dry_run:
+        with Snapshot() as c:
+            if not c.execute("select Z_PK from ZJOURNALENTRYMO where Z_PK=?", (a.id,)).fetchone():
+                die(f"no entry with id {a.id}")
+        print(f"DRY RUN: would update entry {a.id}. Nothing written.")
+        return
+
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
         row = conn.execute("""select Z_PK, ZID, ZMERGEABLEATTRIBUTES
                               from ZJOURNALENTRYMO where Z_PK=?""", (a.id,)).fetchone()
         if not row: die(f"no entry with id {a.id}")
@@ -889,7 +948,13 @@ def cmd_edit(a):
     print(f"Updated entry {a.id} ({', '.join(bits)}).")
 
 def cmd_delete(a):
-    with Live(allow_live_default=a.live) as conn:
+    if a.dry_run:
+        with Snapshot() as c:
+            if not c.execute("select Z_PK from ZJOURNALENTRYMO where Z_PK=?", (a.id,)).fetchone():
+                die(f"no entry with id {a.id}")
+        print(f"DRY RUN: would {'hard' if a.hard else 'soft'}-delete entry {a.id}. Nothing written.")
+        return
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
         row = conn.execute("""select Z_PK, ZID, ZISUPLOADEDTOCLOUD
                               from ZJOURNALENTRYMO where Z_PK=?""", (a.id,)).fetchone()
         if not row: die(f"no entry with id {a.id}")
@@ -948,7 +1013,10 @@ def cmd_deleted(a):
           "  restore <id> brings one back; they purge ~30 days after deletion.")
 
 def cmd_restore(a):
-    with Live(allow_live_default=a.live) as conn:
+    if a.dry_run:
+        print(f"DRY RUN: would restore entry {a.id}. Nothing written.")
+        return
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
         row = conn.execute("""select Z_PK, ZRECENTLYDELETED from ZJOURNALENTRYMO
                               where Z_PK=?""", (a.id,)).fetchone()
         if not row: die(f"no entry with id {a.id}")
@@ -961,7 +1029,14 @@ def cmd_restore(a):
     print(f"Entry {a.id} restored; the restore will sync.")
 
 def cmd_empty(a):
-    with Live(allow_live_default=a.live) as conn:
+    if a.dry_run:
+        with Snapshot() as c:
+            n = c.execute("""select count(*) from ZJOURNALENTRYMO
+                             where coalesce(ZRECENTLYDELETED,0)=1
+                               and coalesce(ZISFULLYREMOVED,0)=0""").fetchone()[0]
+        print(f"DRY RUN: would consider {n} Recently Deleted entr{'y' if n==1 else 'ies'}. Nothing written.")
+        return
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
         rows = conn.execute("""select Z_PK, ZID, ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO
                                where coalesce(ZRECENTLYDELETED,0)=1
                                  and coalesce(ZISFULLYREMOVED,0)=0""").fetchall()
@@ -1068,6 +1143,8 @@ def main():
     w.add_argument("--link", metavar="URL", help="attach a web link")
     w.add_argument("--link-title", help="title for --link (default: none)")
     w.add_argument("--journal", help="journal name or id (default: the app's default journal)")
+    w.add_argument("--dry-run", dest="dry_run", action="store_true")
+    w.add_argument("--accept-risk", dest="accept_risk", action="store_true")
     w.add_argument("--live", action="store_true", help="allow writing to the real store")
     w.set_defaults(func=cmd_write)
 
@@ -1091,6 +1168,8 @@ def main():
     ed.add_argument("--journal", help="move the entry to this journal (name or id)")
     ed.add_argument("--force", action="store_true",
                     help="edit text even when the entry has a CRDT copy")
+    ed.add_argument("--dry-run", dest="dry_run", action="store_true")
+    ed.add_argument("--accept-risk", dest="accept_risk", action="store_true")
     ed.add_argument("--live", action="store_true")
     ed.set_defaults(func=cmd_edit)
 
@@ -1098,16 +1177,24 @@ def main():
     dl.add_argument("--json", action="store_true"); dl.set_defaults(func=cmd_deleted)
 
     rs = sub.add_parser("restore", help="restore an entry from Recently Deleted")
-    rs.add_argument("id", type=int); rs.add_argument("--live", action="store_true")
+    rs.add_argument("id", type=int)
+    rs.add_argument("--dry-run", dest="dry_run", action="store_true")
+    rs.add_argument("--accept-risk", dest="accept_risk", action="store_true")
+    rs.add_argument("--live", action="store_true")
     rs.set_defaults(func=cmd_restore)
 
     em = sub.add_parser("empty", help="purge Recently Deleted (never-synced entries only)")
     em.add_argument("--force", action="store_true",
                     help="also purge synced entries (they may resurrect from iCloud)")
+    em.add_argument("--dry-run", dest="dry_run", action="store_true")
+    em.add_argument("--accept-risk", dest="accept_risk", action="store_true")
     em.add_argument("--live", action="store_true"); em.set_defaults(func=cmd_empty)
 
     d = sub.add_parser("delete"); d.add_argument("id", type=int)
-    d.add_argument("--hard", action="store_true"); d.add_argument("--live", action="store_true")
+    d.add_argument("--hard", action="store_true")
+    d.add_argument("--dry-run", dest="dry_run", action="store_true")
+    d.add_argument("--accept-risk", dest="accept_risk", action="store_true")
+    d.add_argument("--live", action="store_true")
     d.add_argument("--force", action="store_true",
                    help="hard-delete even a synced entry (it may resurrect from iCloud)")
     d.set_defaults(func=cmd_delete)

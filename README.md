@@ -18,8 +18,20 @@ $ journal-cli list --limit 3
 
 $ journal-cli show 117
 audio (asset 705)  2.2s  "This is a test of an audio recording."
-location  15835 NE 36th St, Redmond  (47.641544, -122.129299)
+location  Golden Gate Bridge, San Francisco  (37.8199, -122.4783)
 ```
+
+> [!WARNING]
+> **Back up your journal first.** journal-cli writes directly to Apple
+> Journal's private, undocumented data store. Apple does not support this; a
+> macOS update can change the schema at any time, and a bad write could
+> corrupt entries or confuse iCloud sync across **all** your devices. Before
+> your first live write, export a backup in Journal.app (**Journal → Settings
+> → Export Journal Entries…**). journal-cli also snapshots the local store to
+> `~/Backups/journal-cli/` before every live write, but that cannot undo
+> anything that has already synced to iCloud. **Use at your own risk.** The
+> CLI requires a one-time risk acknowledgment before its first live write
+> (interactive prompt, or `--accept-risk`).
 
 ## Install
 
@@ -48,7 +60,7 @@ Journal.app is open and never lock the live database.
 journal-cli list --limit 20 --full            # --full prints bodies
 journal-cli list --since 2025-01-01 --until 2025-12-31
 journal-cli show 95                           # entry + assets + attachment paths
-journal-cli search anguilla
+journal-cli search tokyo
 journal-cli export --dir ~/journal-export     # one .md per entry, YAML frontmatter
 journal-cli export --dir ~/export --format json
 journal-cli stats                             # counts, words, by-year histogram
@@ -64,8 +76,11 @@ text from drawings.
 ## Writing
 
 Writes against the real store require `--live`, refuse to run while
-Journal.app is open, and take a timestamped backup to `~/Backups/journal-cli/`
-first. New entries sync to iCloud like native ones — verified end to end,
+Journal.app is open, take a timestamped backup to `~/Backups/journal-cli/`
+first, and require a **one-time risk acknowledgment** (interactive prompt, or
+`--accept-risk` for scripts — agents should ask their user before passing it).
+Every mutating command also takes `--dry-run`, which prints the plan and
+writes nothing. New entries sync to iCloud like native ones — verified end to end,
 including CloudKit accepting attached files.
 
 ```sh
@@ -137,6 +152,8 @@ humans:
 | Layer | Behavior |
 |---|---|
 | Reads | temp snapshot of `db`+`-wal`+`-shm`; live store never opened for read |
+| Risk acknowledgment | first live write requires typing "I understand" (or `--accept-risk`); stored in `~/.config/journal-cli/` |
+| `--dry-run` | every mutating command can print its plan and write nothing |
 | `--live` gate | writes to the real store refuse to run without it |
 | App check | writes refuse to run while Journal.app is open |
 | Auto-backup | every live write snapshots the store to `~/Backups/journal-cli/` first |

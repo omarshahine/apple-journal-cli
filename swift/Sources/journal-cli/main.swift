@@ -34,6 +34,9 @@ WRITE (guarded: --live required against the real store; auto-backup first)
   restore   <id> [--live]
   empty     [--force] [--live]
   sandbox   --dir DIR [--from DB]      copy the store somewhere safe for testing
+
+  Every mutating command also takes --dry-run (print the plan, write nothing)
+  and --accept-risk (one-time risk acknowledgment; see the README warning).
 """
 
 var argv = Array(CommandLine.arguments.dropFirst())
@@ -52,6 +55,7 @@ guard let cmd = argv.first, cmd != "--help", cmd != "-h", cmd != "help" else {
 let rest = Array(argv.dropFirst())
 
 let boolFlags: Set<String> = ["--json", "--full", "--include-empty", "--bookmark",
+                              "--dry-run", "--accept-risk",
                               "--no-bookmark", "--live", "--hard", "--force",
                               "--clear-location", "--remove-all-media",
                               "--photos-link", "--no-resize"]

@@ -304,6 +304,20 @@ ok "synced row survived empty" "$(sqlite3 "$DB" "select count(*) from ZJOURNALEN
 "$CLI" --db "$DB" empty --force >/dev/null 2>&1
 ok "empty --force purges" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO where Z_PK=$LPK2;")" "0"
 
+echo "T16 dry run"
+BEFORE_DR=$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO;")
+DR=$("$CLI" --db "$DB" write --body "never lands" --dry-run 2>&1)
+ok "write dry-run says so" "$(echo "$DR" | grep -c 'DRY RUN')" "1"
+ok "write dry-run wrote nothing" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO;")" "$BEFORE_DR"
+DROUT=$("$CLI" --db "$DB" write --body "dr target" 2>&1); DRPK=$(echo "$DROUT"|grep -oE 'entry [0-9]+'|grep -oE '[0-9]+')
+"$CLI" --db "$DB" edit $DRPK --body "changed" --dry-run >/dev/null 2>&1
+ok "edit dry-run left body" "$("$CLI" --db "$DB" show $DRPK --json | jq_ 'd["text"]')" "dr target"
+"$CLI" --db "$DB" delete $DRPK --dry-run >/dev/null 2>&1
+ok "delete dry-run left row" "$(sqlite3 "$DB" "select coalesce(ZRECENTLYDELETED,0) from ZJOURNALENTRYMO where Z_PK=$DRPK;")" "0"
+"$CLI" --db "$DB" edit 999999 --body x --dry-run >/dev/null 2>&1
+ok "edit dry-run validates id" "$?" "1"
+"$CLI" --db "$DB" delete $DRPK --hard >/dev/null 2>&1
+
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"
 SEEDCOUNT=$(sqlite3 "${JOURNAL_SEED:-$DB}" 'select count(*) from ZJOURNALENTRYMO;' 2>/dev/null)

@@ -53,7 +53,19 @@ func cmdWrite(_ a: Args) {
     let entryUUID = uid()
     let title = a.value("--title")
 
-    let pk: Int64 = withLive(allowLiveDefault: a.has("--live")) { db in
+    if a.has("--dry-run") {
+        var bits: [String] = []
+        if hasText { bits.append("\(body.count) chars") }
+        if !media.isEmpty { bits.append("\(media.count) media") }
+        if lp != nil { bits.append("1 live photo") }
+        if link != nil { bits.append("1 link") }
+        if hasLoc { bits.append(String(format: "location %.5f,%.5f", lat!, lon!)) }
+        if let j = a.value("--journal") { bits.append("journal '\(j)'") }
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
+        print("DRY RUN: would create entry (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)). Nothing written.")
+        return
+    }
+    let pk: Int64 = withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
         let (ent, pk) = nextPK(db, "JournalEntryMO")
         db.exec("""
             insert into ZJOURNALENTRYMO
@@ -175,8 +187,15 @@ func cmdEdit(_ a: Args) {
         die("nothing to change")
     }
 
+    if a.has("--dry-run") {
+        let exists = withSnapshot { db in
+            db.one("select Z_PK from ZJOURNALENTRYMO where Z_PK=?", [pk]) != nil }
+        if !exists { die("no entry with id \(pk)") }
+        print("DRY RUN: would update entry \(pk). Nothing written.")
+        return
+    }
     var removed = 0
-    withLive(allowLiveDefault: a.has("--live")) { db in
+    withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
         guard let row = db.one("""
             select Z_PK, ZID, ZMERGEABLEATTRIBUTES from ZJOURNALENTRYMO where Z_PK=?
             """, [pk]) else { die("no entry with id \(pk)") }
@@ -302,7 +321,14 @@ func cmdEdit(_ a: Args) {
 
 func cmdDelete(_ a: Args) {
     guard let idStr = a.positional.first, let pk = Int64(idStr) else { die("delete needs an entry id") }
-    let what: String = withLive(allowLiveDefault: a.has("--live")) { db in
+    if a.has("--dry-run") {
+        let exists = withSnapshot { db in
+            db.one("select Z_PK from ZJOURNALENTRYMO where Z_PK=?", [pk]) != nil }
+        if !exists { die("no entry with id \(pk)") }
+        print("DRY RUN: would \(a.has("--hard") ? "hard-delete" : "soft-delete") entry \(pk). Nothing written.")
+        return
+    }
+    let what: String = withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
         guard let row = db.one("""
             select Z_PK, ZID, ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=?
             """, [pk]) else { die("no entry with id \(pk)") }
@@ -340,7 +366,11 @@ func cmdDelete(_ a: Args) {
 
 func cmdRestore(_ a: Args) {
     guard let idStr = a.positional.first, let pk = Int64(idStr) else { die("restore needs an entry id") }
-    withLive(allowLiveDefault: a.has("--live")) { db in
+    if a.has("--dry-run") {
+        print("DRY RUN: would restore entry \(pk). Nothing written.")
+        return
+    }
+    withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
         guard let row = db.one("""
             select Z_PK, ZRECENTLYDELETED from ZJOURNALENTRYMO where Z_PK=?
             """, [pk]) else { die("no entry with id \(pk)") }
@@ -356,8 +386,17 @@ func cmdRestore(_ a: Args) {
 }
 
 func cmdEmpty(_ a: Args) {
+    if a.has("--dry-run") {
+        let n: Int = withSnapshot { db in
+            db.query("""
+                select Z_PK from ZJOURNALENTRYMO
+                where coalesce(ZRECENTLYDELETED,0)=1 and coalesce(ZISFULLYREMOVED,0)=0
+                """).count }
+        print("DRY RUN: would consider \(n) Recently Deleted entr\(n == 1 ? "y" : "ies"). Nothing written.")
+        return
+    }
     var purged = 0, skipped = 0
-    withLive(allowLiveDefault: a.has("--live")) { db in
+    withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
         for r in db.query("""
             select Z_PK, ZID, ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO
             where coalesce(ZRECENTLYDELETED,0)=1 and coalesce(ZISFULLYREMOVED,0)=0

@@ -69,6 +69,14 @@ for anything experimental; replay with `--live` once it looks right.
 
 ## Sharp edges — do not work around these
 
+- **First live write requires a risk acknowledgment.** If the CLI refuses with
+  the risk warning, show the warning to the user and ask them to confirm
+  (and to back up via Journal -> Settings -> Export Journal Entries first);
+  only pass `--accept-risk` after they explicitly agree. Never pass it
+  preemptively.
+- **Prefer `--dry-run` first** for any write you compose: it validates inputs
+  and prints the plan without touching the store.
+
 - **Never bypass a refusal by adding `--force` on your own.** Two guards
   exist for data-safety reasons and overriding them needs the user's explicit
   ok:

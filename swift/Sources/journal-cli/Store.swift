@@ -36,8 +36,53 @@ func takeBackup(reason: String = "write") -> String {
     return dir
 }
 
+let RISK_MARKER = NSHomeDirectory() + "/.config/journal-cli/risk-accepted"
+
+let RISK_WARNING = """
+================================ WARNING =====================================
+journal-cli writes DIRECTLY to Apple Journal's private, undocumented data
+store. Apple does not support this. A future macOS update can change the
+schema at any time, and a malformed write could corrupt entries or confuse
+iCloud sync across ALL your devices.
+
+Before your first live write:
+  1. BACK UP your journal in Journal.app:
+       Journal -> Settings -> Export Journal Entries...
+  2. Know that journal-cli also snapshots the local store to
+     ~/Backups/journal-cli/ before every live write -- but that cannot undo
+     anything that has already synced to iCloud.
+
+You use this tool AT YOUR OWN RISK.
+==============================================================================
+"""
+
+func ensureRiskAccepted(acceptFlag: Bool) {
+    if FileManager.default.fileExists(atPath: RISK_MARKER) { return }
+    func record() {
+        try? FileManager.default.createDirectory(
+            atPath: (RISK_MARKER as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try? "accepted \(Date())\n".write(toFile: RISK_MARKER, atomically: true, encoding: .utf8)
+    }
+    FileHandle.standardError.write((RISK_WARNING + "\n").data(using: .utf8)!)
+    if acceptFlag {
+        FileHandle.standardError.write("Risk accepted via --accept-risk.\n".data(using: .utf8)!)
+        record(); return
+    }
+    if isatty(0) != 0 {
+        FileHandle.standardError.write("Type \"I understand\" to continue: ".data(using: .utf8)!)
+        let line = readLine() ?? ""
+        if line.trimmingCharacters(in: .whitespaces).lowercased() == "i understand" {
+            record(); return
+        }
+        die("not accepted; nothing was written")
+    }
+    die("first live write requires accepting the risk above.\n"
+        + "  Re-run with --accept-risk (agents: ask the user before passing this).")
+}
+
 /// Read-write against the target store, with the real-store guards.
-func withLive<T>(allowLiveDefault: Bool, _ body: (DB) -> T) -> T {
+func withLive<T>(allowLiveDefault: Bool, acceptRisk: Bool = false, _ body: (DB) -> T) -> T {
     let isDefault = (URL(fileURLWithPath: DB_PATH).resolvingSymlinksInPath().path
                      == URL(fileURLWithPath: DEFAULT_DB).resolvingSymlinksInPath().path)
     if isDefault {
@@ -45,6 +90,7 @@ func withLive<T>(allowLiveDefault: Bool, _ body: (DB) -> T) -> T {
             die("refusing to modify the real Journal store without --live.\n"
                 + "  Test against a sandbox first:  journal-cli sandbox --dir DIR")
         }
+        ensureRiskAccepted(acceptFlag: acceptRisk)
         if journalRunning() { die("Journal.app is running. Quit it first, then retry.") }
         FileHandle.standardError.write("backup: \(takeBackup())\n".data(using: .utf8)!)
     }
