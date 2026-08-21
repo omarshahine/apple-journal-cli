@@ -5,6 +5,8 @@ Subcommands:
   journals                       list Day One journals and entry counts
   plan     <journal>             what would be imported, and what can't be
   import   <journal>             write the entries via journal-cli
+  fix-locations <journal>        correct imported locations from photo EXIF
+  fix-text <journal>             re-render entries that show raw Markdown
   fix-export <journal> <dir>     repair a Day One markdown export in place
 
 Why this exists: Day One's markdown export silently renders every timestamp
