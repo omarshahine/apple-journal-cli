@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build + test (Swift)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: swift build -c release
+        working-directory: swift
+
+      - name: Make fixture store
+        id: fixture
+        run: |
+          DB=$(tests/make-fixture.sh "$RUNNER_TEMP/fixture")
+          echo "db=$DB" >> "$GITHUB_OUTPUT"
+
+      - name: Run test suite
+        env:
+          JOURNAL_SEED: ${{ steps.fixture.outputs.db }}
+          JOURNAL_CLI: ${{ github.workspace }}/swift/.build/release/journal-cli
+        run: tests/test_write.sh
+
+  test-reference:
+    name: Test (Python reference)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make fixture store
+        id: fixture
+        run: |
+          DB=$(tests/make-fixture.sh "$RUNNER_TEMP/fixture")
+          echo "db=$DB" >> "$GITHUB_OUTPUT"
+
+      - name: Run test suite
+        env:
+          JOURNAL_SEED: ${{ steps.fixture.outputs.db }}
+          JOURNAL_CLI: ${{ github.workspace }}/reference/journal-cli.py
+        run: tests/test_write.sh

@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build universal binary + GitHub Release
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert tag matches npm package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./npm/package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match npm/package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Build universal binary
+        run: swift build -c release --arch arm64 --arch x86_64
+        working-directory: swift
+
+      - name: Run test suite against the release binary
+        env:
+          JOURNAL_CLI: ${{ github.workspace }}/swift/.build/apple/Products/Release/journal-cli
+        run: |
+          DB=$(tests/make-fixture.sh "$RUNNER_TEMP/fixture")
+          JOURNAL_SEED="$DB" tests/test_write.sh
+
+      - name: Package binary
+        run: |
+          BIN=swift/.build/apple/Products/Release/journal-cli
+          file "$BIN"
+          tar czf "journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" -C "$(dirname "$BIN")" journal-cli
+          shasum -a 256 "journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" | tee checksums.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "journal-cli $GITHUB_REF_NAME" \
+            --generate-notes \
+            "journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" \
+            checksums.txt

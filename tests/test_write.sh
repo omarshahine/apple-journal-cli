@@ -99,7 +99,7 @@ ok "ordering has both" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING
 echo "T6 export includes media + location"
 EXP="$SB/exp"; "$CLI" --db "$DB" export --dir "$EXP" >/dev/null 2>&1
 ok "location in frontmatter" "$(grep -l 'Space Needle' "$EXP"/*-"$LPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
-ok "export wrote files" "$([ "$(ls "$EXP" | wc -l | tr -d ' ')" -gt 50 ] && echo yes || echo no)" "yes"
+ok "export wrote files" "$([ "$(ls "$EXP" | wc -l | tr -d ' ')" -ge 3 ] && echo yes || echo no)" "yes"
 ok "media linked for media entry" "$(grep -l '_resized' "$EXP"/*-"$MPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
 ok "media linked for combo entry" "$(grep -l '_resized' "$EXP"/*-"$BPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
 ok "location scoped to its entry" "$(grep -l 'Space Needle' "$EXP"/*-"$LPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"

@@ -1,0 +1,50 @@
+name: Publish to NPM
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish apple-journal-cli to NPM
+    # macOS runner: the package ships a prebuilt universal Mach-O binary.
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Assert tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $TAG_VERSION does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+        working-directory: npm
+
+      - name: Build universal binary
+        run: swift build -c release --arch arm64 --arch x86_64
+        working-directory: swift
+
+      - name: Smoke-test the binary
+        run: |
+          swift/.build/apple/Products/Release/journal-cli --help | head -3
+
+      - name: Publish to NPM (OIDC trusted publishing)
+        run: npm publish --provenance --access public
+        working-directory: npm
+
+      - name: Verify
+        run: npm view apple-journal-cli version
