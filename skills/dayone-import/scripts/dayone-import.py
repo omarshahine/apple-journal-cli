@@ -293,7 +293,7 @@ def cmd_fix_locations(args):
     fixes, skipped_unverified = [], []
     for e in entries:
         pk = state["done"].get(e["uuid"])
-        if not isinstance(pk, int):
+        if type(pk) is not int:
             continue
         got = _photo_fix(e)
         if not got:
@@ -483,7 +483,9 @@ def cmd_fix_text(args):
     todo, reasons, edited = [], collections.Counter(), []
     for e in entries:
         pk = state["done"].get(e["uuid"])
-        if not isinstance(pk, int) or pk not in stored:
+        # `True` is an int in Python and equal to 1, so a state record that
+        # fell back to a boolean would otherwise target entry 1.
+        if type(pk) is not int or pk not in stored:
             continue
         title, text, rtf = stored[pk]
         # An entry edited in Journal since import carries Journal's own CRDT

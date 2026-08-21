@@ -76,6 +76,9 @@ private func protectInline(_ s: String, _ base: UInt32) -> String {
            let scalar = Unicode.Scalar(base + UInt32(i)) {
             out.unicodeScalars.append(scalar)
         } else {
+            // Markdown only escapes its own punctuation; a backslash before
+            // anything else is literal text, as in a Windows path.
+            out.append("\\")
             out.append(ch)
         }
     }
@@ -103,8 +106,7 @@ private func protectInline(_ s: String, _ base: UInt32) -> String {
         }
     }
     if inCode {                            // unterminated span stays literal
-        out.append(hideAll("`", base))
-        out.append(code)
+        out.append(hideAll("`" + code, base))
     }
     if escaping { out.append("\\") }        // a trailing lone backslash
     return out

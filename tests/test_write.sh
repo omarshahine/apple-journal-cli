@@ -390,6 +390,9 @@ if [ $? -eq 0 ]; then
   ok "render --plain works"           "$(printf '###### H' | "$CLI" render --plain)" "H"
   ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
   ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
+  ok "backslash before non-escapable" "$(printf 'C:\\Users\\omar' | "$CLI" render --plain)" 'C:\Users\omar'
+  ok "unterminated code stays literal" "$(printf 'a `**x** b' | "$CLI" render --plain)" 'a `**x** b'
+  ok "unterminated code not bolded"   "$(printf 'a `**x** b' | "$CLI" render | grep -c 'Bold')" "0"
   TRI=$(printf '***both***' | "$CLI" render)
   ok "triple emphasis is bold"        "$(printf '%s' "$TRI" | grep -c 'Bold')" "1"
   ok "triple emphasis is italic"      "$(printf '%s' "$TRI" | grep -c 'Italic')" "1"

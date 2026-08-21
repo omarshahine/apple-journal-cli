@@ -13,10 +13,12 @@ private func readBodyRTF(_ a: Args) -> (data: Data, plain: String)? {
     guard let d = FileManager.default.contents(atPath: full) else {
         die("cannot read --body-rtf file: \(path)")
     }
-    guard let att = NSAttributedString(rtf: d, documentAttributes: nil) else {
+    guard NSAttributedString(rtf: d, documentAttributes: nil) != nil else {
         die("--body-rtf is not valid RTF: \(path)")
     }
-    return (d, att.string)
+    // rtfToText is what every read path uses, so ZTEXTLENGTH and the
+    // emptiness check describe what `show` will actually return.
+    return (d, rtfToText(d))
 }
 
 private func readBody(_ a: Args) -> String? {
