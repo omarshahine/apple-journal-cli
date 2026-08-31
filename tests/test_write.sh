@@ -24,6 +24,19 @@ pass=0; fail=0
 ok(){ if [ "$2" = "$3" ]; then echo "  PASS  $1"; pass=$((pass+1));
       else echo "  FAIL  $1 (want '$3', got '$2')"; fail=$((fail+1)); fi; }
 jq_(){ python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
+# Export names a file "<YYYY>-<MM>-<DD>-<id>[-slug].md", so the id is the 4th
+# hyphen-separated field. A glob like *-"$PK"*.md is not that test: with PK=31
+# it also matches every file dated the 31st, and with PK=1 it matches ids 10-19.
+# That is a real failure this suite hit ("media linked for media entry",
+# want 1 got 2) on any run where a pk collided with a date component.
+entryfiles(){ # entryfiles <dir> <pk>
+  local d="$1" pk="$2" f base
+  for f in "$d"/*.md; do
+    [ -e "$f" ] || continue
+    base=$(basename "$f" .md)
+    [ "$(echo "$base" | cut -d- -f4)" = "$pk" ] && echo "$f"
+  done
+}
 
 BEFORE=$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO;")
 MAX0=$(sqlite3 "$DB" "select Z_MAX from Z_PRIMARYKEY where Z_NAME='JournalEntryMO';")
@@ -98,11 +111,11 @@ ok "ordering has both" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING
 
 echo "T6 export includes media + location"
 EXP="$SB/exp"; "$CLI" --db "$DB" export --dir "$EXP" >/dev/null 2>&1
-ok "location in frontmatter" "$(grep -l 'Space Needle' "$EXP"/*-"$LPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
+ok "location in frontmatter" "$(entryfiles "$EXP" "$LPK" | xargs -r grep -l 'Space Needle' 2>/dev/null | wc -l | tr -d ' ')" "1"
 ok "export wrote files" "$([ "$(ls "$EXP" | wc -l | tr -d ' ')" -ge 3 ] && echo yes || echo no)" "yes"
-ok "media linked for media entry" "$(grep -l '_resized' "$EXP"/*-"$MPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
-ok "media linked for combo entry" "$(grep -l '_resized' "$EXP"/*-"$BPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
-ok "location scoped to its entry" "$(grep -l 'Space Needle' "$EXP"/*-"$LPK"*.md 2>/dev/null | wc -l | tr -d ' ')" "1"
+ok "media linked for media entry" "$(entryfiles "$EXP" "$MPK" | xargs -r grep -l '_resized' 2>/dev/null | wc -l | tr -d ' ')" "1"
+ok "media linked for combo entry" "$(entryfiles "$EXP" "$BPK" | xargs -r grep -l '_resized' 2>/dev/null | wc -l | tr -d ' ')" "1"
+ok "location scoped to its entry" "$(entryfiles "$EXP" "$LPK" | xargs -r grep -l 'Space Needle' 2>/dev/null | wc -l | tr -d ' ')" "1"
 
 echo "T7 edit"
 EOUT=$("$CLI" --db "$DB" write --body "Original body." --title "Original" 2>&1)
