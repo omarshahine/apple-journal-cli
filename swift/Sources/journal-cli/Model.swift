@@ -184,7 +184,7 @@ func nextPK(_ db: DB, _ entityName: String) -> (ent: Int64, pk: Int64) {
 
 @discardableResult
 func addAsset(_ db: DB, entryPK: Int64, entryUUID: String, type: String, source: String,
-              metadata: [String: Any]?, slim: Int = 0) -> (pk: Int64, uuid: String) {
+              metadata: [String: Any]?, slim: Int = 0, hidden: Int = 0) -> (pk: Int64, uuid: String) {
     let (ent, pk) = nextPK(db, "JournalEntryAssetMO")
     let au = uid()
     db.exec("""
@@ -193,9 +193,9 @@ func addAsset(_ db: DB, entryPK: Int64, entryUUID: String, type: String, source:
            ZCREATEDDATE, ZASSETMETADATA, ZISSLIM, ZISHIDDEN, ZISBEINGEDITED,
            ZISUNDOABLYDELETED, ZISUPLOADEDTOCLOUD, ZISREMOVEDFROMCLOUD,
            ZREFRESHASSETMETADATA, ZMINIMUMSUPPORTEDAPPVERSION)
-        values (?,?,1,?,?,?,?,?,?,?,?,0,0,0,0,0,0,0)
+        values (?,?,1,?,?,?,?,?,?,?,?,?,0,0,0,0,0,0)
         """, [pk, ent, entryPK, uidBytes(au), uidBytes(entryUUID), type, source,
-              cdNow(), metadata.map(metaBlob), slim])
+              cdNow(), metadata.map(metaBlob), slim, hidden])
     return (pk, au)
 }
 

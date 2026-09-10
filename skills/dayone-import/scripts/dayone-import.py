@@ -190,6 +190,12 @@ def cmd_import(args):
     if _render(args.cli, "probe") is None:
         die("%s does not support --markdown (needs journal-cli 1.1.0+)"
             % args.cli)
+    if any(e["lat"] is not None and e["lon"] is not None for e in todo):
+        probe = [args.cli, "write", "--body", "probe", "--lat", "0", "--lon", "0",
+                 "--location-presentation", "off", "--dry-run"]
+        if subprocess.run(probe, capture_output=True, text=True).returncode:
+            die("%s does not support --location-presentation (needs journal-cli 1.2.0+)"
+                % args.cli)
 
     live = not args.target_db
     print("Day One '%s' -> Apple Journal '%s'" % (j["name"], target))
@@ -222,6 +228,7 @@ def cmd_import(args):
             cmd += ["--bookmark"]
         if e["lat"] is not None and e["lon"] is not None:
             cmd += ["--lat", "%.6f" % e["lat"], "--lon", "%.6f" % e["lon"]]
+            cmd += ["--location-presentation", args.location_presentation]
             if e["place"]:
                 cmd += ["--place", e["place"]]
             if e["city"]:
@@ -868,6 +875,8 @@ def main():
     s.add_argument("--time-mode", choices=["local", "utc"], default="local",
                    help="local (default) preserves the wall clock you "
                         "experienced; utc preserves the true instant")
+    s.add_argument("--location-presentation", choices=["off", "small", "large"],
+                   default="small", help="how Journal shows imported locations in each entry")
     s.add_argument("--limit", type=int)
     s.add_argument("--state", help="resume file (default: ~/.local/state/...)")
     s.add_argument("--max-failures", type=int, default=5)

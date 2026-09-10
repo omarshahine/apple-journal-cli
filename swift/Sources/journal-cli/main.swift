@@ -24,7 +24,8 @@ WRITE (guarded: --live required against the real store; auto-backup first)
             [--markdown]
             [--media PATH...] [--live-photo IMAGE VIDEO] [--no-resize]
             [--photos-link] [--link URL] [--link-title T]
-            [--lat N --lon N] [--place P] [--city C] [--journal NAME] [--live]
+            [--lat N --lon N] [--place P] [--city C] [--location-presentation off|small|large]
+            [--journal NAME] [--live]
   edit      <id> [--title T] [--body B] [--body-file F] [--body-rtf F] [--date D]
             [--bookmark | --no-bookmark] [--add-media PATH...] [--no-resize]
             [--photos-link] [--add-link URL] [--link-title T]
@@ -70,7 +71,7 @@ let boolFlags: Set<String> = ["--json", "--full", "--include-empty", "--bookmark
                               "--photos-link", "--no-resize"]
 let valueFlags: Set<String> = ["--limit", "--since", "--until", "--dir", "--format",
                                "--title", "--body", "--body-file", "--body-rtf", "--date",
-                               "--lat", "--lon", "--place", "--city", "--journal",
+                               "--lat", "--lon", "--place", "--city", "--location-presentation", "--journal",
                                "--link", "--link-title", "--add-link", "--from"]
 let listFlags: Set<String> = ["--media", "--add-media", "--live-photo", "--remove-media"]
 
