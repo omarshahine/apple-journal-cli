@@ -615,7 +615,7 @@ def next_pk(conn, kind):
     conn.execute("update Z_PRIMARYKEY set Z_MAX=? where Z_NAME=?", (pk, name))
     return row["Z_ENT"], pk
 
-def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0):
+def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0, hidden=0):
     ent, pk = next_pk(conn, "asset")
     au = uid()
     conn.execute("""
@@ -624,9 +624,9 @@ def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0):
            ZCREATEDDATE, ZASSETMETADATA, ZISSLIM, ZISHIDDEN, ZISBEINGEDITED,
            ZISUNDOABLYDELETED, ZISUPLOADEDTOCLOUD, ZISREMOVEDFROMCLOUD,
            ZREFRESHASSETMETADATA, ZMINIMUMSUPPORTEDAPPVERSION)
-        values (?,?,1,?,?,?,?,?,?,?,?,0,0,0,0,0,0,0)""",
+        values (?,?,1,?,?,?,?,?,?,?,?,?,0,0,0,0,0,0)""",
         (pk, ent, entry_pk, uid_bytes(au), uid_bytes(entry_uuid), asset_type, source,
-         cd_now(), meta_blob(metadata) if metadata is not None else None, slim))
+         cd_now(), meta_blob(metadata) if metadata is not None else None, slim, hidden))
     return pk, au
 
 def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index,
@@ -673,6 +673,10 @@ def cmd_write(a):
     has_loc = a.lat is not None or a.lon is not None
     if has_loc and (a.lat is None or a.lon is None):
         die("--lat and --lon must be given together")
+    if a.location_presentation and not has_loc:
+        die("--location-presentation needs --lat and --lon")
+    presentation = a.location_presentation or "small"
+    slim, hidden = {"off": (0, 1), "small": (1, 0), "large": (0, 0)}[presentation]
     if not (body and body.strip()) and not media and not lp and not has_loc and not a.link:
         die("nothing to write (need --body/--body-file/stdin, --media, --live-photo, "
             "--link, or --lat/--lon)")
@@ -752,7 +756,7 @@ def cmd_write(a):
             if a.place: visit["placeName"] = a.place
             if a.city:  visit["city"] = a.city
             _, au = add_asset(conn, pk, entry_uuid, "multiPinMap", "locationPicker",
-                              {"revision": 2, "visitsData": [visit]}, slim=1)
+                              {"revision": 2, "visitsData": [visit]}, slim=slim, hidden=hidden)
             ordering += [au, idx]
 
         if ordering:
@@ -838,6 +842,10 @@ def cmd_edit(a):
     has_loc = a.lat is not None or a.lon is not None
     if has_loc and (a.lat is None or a.lon is None):
         die("--lat and --lon must be given together")
+    if a.location_presentation and not has_loc:
+        die("--location-presentation needs --lat and --lon")
+    presentation = a.location_presentation or "small"
+    slim, hidden = {"off": (0, 1), "small": (1, 0), "large": (0, 0)}[presentation]
     bookmark = True if a.bookmark else (False if a.no_bookmark else None)
     touches_text = body is not None or a.title is not None
     if not any([touches_text, media, has_loc, a.clear_location, a.add_link,
@@ -924,7 +932,7 @@ def cmd_edit(a):
             if a.place: visit["placeName"] = a.place
             if a.city:  visit["city"] = a.city
             _, au = add_asset(conn, a.id, entry_uuid, "multiPinMap", "locationPicker",
-                              {"revision": 2, "visitsData": [visit]}, slim=1)
+                              {"revision": 2, "visitsData": [visit]}, slim=slim, hidden=hidden)
             added.append(au)
 
         if a.add_link:
@@ -1193,6 +1201,8 @@ def main():
     w.add_argument("--lat", type=float); w.add_argument("--lon", type=float)
     w.add_argument("--place", help="place name for the location pin")
     w.add_argument("--city")
+    w.add_argument("--location-presentation", choices=["off", "small", "large"],
+                   help="show the location in the entry as off, small, or large (default: small)")
     w.add_argument("--link", metavar="URL", help="attach a web link")
     w.add_argument("--link-title", help="title for --link (default: none)")
     w.add_argument("--journal", help="journal name or id (default: the app's default journal)")
@@ -1215,6 +1225,8 @@ def main():
     ed.add_argument("--remove-all-media", action="store_true")
     ed.add_argument("--lat", type=float); ed.add_argument("--lon", type=float)
     ed.add_argument("--place"); ed.add_argument("--city")
+    ed.add_argument("--location-presentation", choices=["off", "small", "large"],
+                    help="show the replacement location as off, small, or large (default: small)")
     ed.add_argument("--clear-location", action="store_true")
     ed.add_argument("--add-link", metavar="URL")
     ed.add_argument("--link-title")

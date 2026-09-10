@@ -48,6 +48,21 @@ private func warnStagingJournal() {
             .data(using: .utf8)!)
 }
 
+/// Journal represents the three location-card choices as two asset flags.
+/// A hidden map remains attached to the entry and in the Places index.
+private func locationPresentation(_ a: Args, hasLocation: Bool) -> (slim: Int, hidden: Int) {
+    let presentation = a.value("--location-presentation") ?? "small"
+    guard hasLocation || a.value("--location-presentation") == nil else {
+        die("--location-presentation needs --lat and --lon")
+    }
+    switch presentation {
+    case "off": return (0, 1)
+    case "small": return (1, 0)
+    case "large": return (0, 0)
+    default: die("--location-presentation must be off, small, or large")
+    }
+}
+
 // Render Markdown the way `write --markdown` would, without touching a store.
 // Lets callers compare an entry's stored text against what it *should* be,
 // which is exact where sniffing for leftover syntax is guesswork.
@@ -85,6 +100,7 @@ func cmdWrite(_ a: Args) {
     let lat = a.double("--lat"), lon = a.double("--lon")
     let hasLoc = lat != nil || lon != nil
     if hasLoc && (lat == nil || lon == nil) { die("--lat and --lon must be given together") }
+    let locationPresentation = locationPresentation(a, hasLocation: hasLoc)
     let link = a.value("--link")
     let hasText = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     let title = a.value("--title").map { a.has("--markdown") ? markdownToInlinePlain($0) : $0 }
@@ -182,7 +198,9 @@ func cmdWrite(_ a: Args) {
             if let c = a.value("--city") { visit["city"] = c }
             let (_, au) = addAsset(db, entryPK: pk, entryUUID: entryUUID,
                                    type: "multiPinMap", source: "locationPicker",
-                                   metadata: ["revision": 2, "visitsData": [visit]], slim: 1)
+                                   metadata: ["revision": 2, "visitsData": [visit]],
+                                   slim: locationPresentation.slim,
+                                   hidden: locationPresentation.hidden)
             ordering.append(au)
         }
         if !ordering.isEmpty { orderingAppend(db, pk, ordering) }
@@ -227,6 +245,7 @@ func cmdEdit(_ a: Args) {
     let lat = a.double("--lat"), lon = a.double("--lon")
     let hasLoc = lat != nil || lon != nil
     if hasLoc && (lat == nil || lon == nil) { die("--lat and --lon must be given together") }
+    let locationPresentation = locationPresentation(a, hasLocation: hasLoc)
     let bookmark: Bool? = a.has("--bookmark") ? true : (a.has("--no-bookmark") ? false : nil)
     let touchesText = body != nil || title != nil
     let removeMedia = a.values("--remove-media").compactMap { Int64($0) }
@@ -347,7 +366,9 @@ func cmdEdit(_ a: Args) {
             if let c = a.value("--city") { visit["city"] = c }
             let (_, au) = addAsset(db, entryPK: pk, entryUUID: entryUUID ?? uid(),
                                    type: "multiPinMap", source: "locationPicker",
-                                   metadata: ["revision": 2, "visitsData": [visit]], slim: 1)
+                                   metadata: ["revision": 2, "visitsData": [visit]],
+                                   slim: locationPresentation.slim,
+                                   hidden: locationPresentation.hidden)
             added.append(au)
         }
         if !added.isEmpty { orderingAppend(db, pk, added) }

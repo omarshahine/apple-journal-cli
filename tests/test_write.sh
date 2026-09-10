@@ -79,12 +79,24 @@ LPK=$(echo "$LOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 ok "map asset created" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$LPK and ZASSETTYPE='multiPinMap';")" "1"
 ok "source locationPicker" "$(sqlite3 "$DB" "select ZSOURCE from ZJOURNALENTRYASSETMO where ZENTRY=$LPK;")" "locationPicker"
 ok "isSlim set" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$LPK;")" "1"
+ok "small location is visible" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$LPK;")" "0"
 ok "metadata version byte" "$(sqlite3 "$DB" "select hex(substr(ZASSETMETADATA,1,1)) from ZJOURNALENTRYASSETMO where ZENTRY=$LPK;")" "01"
 ok "lat round-trips" "$("$CLI" --db "$DB" show $LPK --json | jq_ 'round(d["assets"][0]["places"][0]["lat"],5)')" "47.62055"
 ok "lon round-trips" "$("$CLI" --db "$DB" show $LPK --json | jq_ 'round(d["assets"][0]["places"][0]["lon"],5)')" "-122.3493"
 ok "place name" "$("$CLI" --db "$DB" show $LPK --json | jq_ 'd["assets"][0]["places"][0]["name"]')" "Space Needle"
 ok "city" "$("$CLI" --db "$DB" show $LPK --json | jq_ 'd["assets"][0]["places"][0]["city"]')" "Seattle"
 ok "asset parented to entry" "$(sqlite3 "$DB" "select hex(a.ZPARENTID)=hex(e.ZID) from ZJOURNALENTRYASSETMO a join ZJOURNALENTRYMO e on e.Z_PK=a.ZENTRY where a.ZENTRY=$LPK;")" "1"
+
+echo "T3a location presentation"
+POUT=$("$CLI" --db "$DB" write --body "Private location." --lat 47.6 --lon -122.3 --location-presentation off 2>&1)
+PPK=$(echo "$POUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ok "off location remains an asset" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$PPK and ZASSETTYPE='multiPinMap';")" "1"
+ok "off location is hidden" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "1"
+ok "off location is not slim" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "0"
+LOUT2=$("$CLI" --db "$DB" write --body "Big map." --lat 47.6 --lon -122.3 --location-presentation large 2>&1)
+LPK2=$(echo "$LOUT2" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ok "large location is visible" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$LPK2;")" "0"
+ok "large location is not slim" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$LPK2;")" "0"
 
 echo "T4 media"
 MOUT=$("$CLI" --db "$DB" write --body "With pictures." --media "$IMG" "$MOV" 2>&1)
@@ -135,6 +147,10 @@ ok "location added" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO 
 ok "location reads back" "$("$CLI" --db "$DB" show $EPK --json | jq_ '[p for a in d["assets"] for p in a.get("places",[])][0]["name"]')" "Big Ben"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --place "Eiffel Tower" >/dev/null 2>&1
 ok "location replaced not duplicated" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
+"$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation off >/dev/null 2>&1
+ok "edit can hide location" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
+"$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation large >/dev/null 2>&1
+ok "edit can enlarge location" "$(sqlite3 "$DB" "select ZISSLIM || ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "00"
 "$CLI" --db "$DB" edit $EPK --add-media "$IMG" >/dev/null 2>&1
 ok "media added to existing entry" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='photo';")" "1"
 ok "ordering covers both assets" "$(sqlite3 "$DB" "select json_array_length(ZASSETORDERING) from ZJOURNALENTRYMO where Z_PK=$EPK;")" "4"

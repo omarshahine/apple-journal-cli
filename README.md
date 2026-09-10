@@ -96,7 +96,8 @@ journal-cli write --live --body "Golden hour" --live-photo IMG_0123.heic IMG_012
 
 # location pin
 journal-cli write --live --body "At the office" \
-    --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle
+    --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle \
+    --location-presentation off # off, small (default), or large
 
 # web link (renders as a rich link card)
 journal-cli write --live --body "Read this" --link https://example.com --link-title "A Post"
@@ -141,7 +142,7 @@ S=skills/dayone-import/scripts/dayone-import.py
 
 python3 $S journals                    # list Day One journals
 python3 $S plan "Travel Journal"       # what imports, and what can't
-python3 $S import "Travel Journal" --into "Travel" --target-db "$(journal-cli sandbox --dir /tmp/r)"
+python3 $S import "Travel Journal" --into "Travel" --location-presentation off --target-db "$(journal-cli sandbox --dir /tmp/r)"
 python3 $S import "Travel Journal" --into "Travel"
 ```
 
