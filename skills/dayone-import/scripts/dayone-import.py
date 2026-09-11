@@ -192,10 +192,10 @@ def cmd_import(args):
             % args.cli)
     if any(e["lat"] is not None and e["lon"] is not None for e in todo):
         probe = [args.cli, "write", "--body", "probe", "--lat", "0", "--lon", "0",
-                 "--location-presentation", "off", "--dry-run"]
+                 "--location-presentation", args.location_presentation, "--dry-run"]
         if subprocess.run(probe, capture_output=True, text=True).returncode:
-            die("%s does not support --location-presentation (needs journal-cli 1.2.0+)"
-                % args.cli)
+            die("%s does not support --location-presentation %s (needs journal-cli 1.3.0+)"
+                % (args.cli, args.location_presentation))
 
     live = not args.target_db
     print("Day One '%s' -> Apple Journal '%s'" % (j["name"], target))
@@ -875,8 +875,11 @@ def main():
     s.add_argument("--time-mode", choices=["local", "utc"], default="local",
                    help="local (default) preserves the wall clock you "
                         "experienced; utc preserves the true instant")
-    s.add_argument("--location-presentation", choices=["off", "small", "large"],
-                   default="small", help="how Journal shows imported locations in each entry")
+    s.add_argument("--location-presentation", choices=["small", "large"],
+                   default="small",
+                   help="map size for imported locations (default: small). Journal "
+                        "stores a hidden map only in an entry's CRDT, so there is no "
+                        "'off' journal-cli can write")
     s.add_argument("--limit", type=int)
     s.add_argument("--state", help="resume file (default: ~/.local/state/...)")
     s.add_argument("--max-failures", type=int, default=5)

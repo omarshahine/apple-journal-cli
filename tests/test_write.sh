@@ -88,15 +88,42 @@ ok "city" "$("$CLI" --db "$DB" show $LPK --json | jq_ 'd["assets"][0]["places"][
 ok "asset parented to entry" "$(sqlite3 "$DB" "select hex(a.ZPARENTID)=hex(e.ZID) from ZJOURNALENTRYASSETMO a join ZJOURNALENTRYMO e on e.Z_PK=a.ZENTRY where a.ZENTRY=$LPK;")" "1"
 
 echo "T3a location presentation"
-POUT=$("$CLI" --db "$DB" write --body "Private location." --lat 47.6 --lon -122.3 --location-presentation off 2>&1)
-PPK=$(echo "$POUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
-ok "off location remains an asset" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$PPK and ZASSETTYPE='multiPinMap';")" "1"
-ok "off location is hidden" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "1"
-ok "off location is not slim" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "0"
+# Journal keeps a map's Off state in the entry CRDT (hiddenAssetIDs), never in
+# the asset row, and reads ZISHIDDEN=1 as "no such asset" -- which loses the
+# location from Places too. So `off` must be refused, not approximated.
+POUT=$("$CLI" --db "$DB" write --body "Private location." --lat 47.6 --lon -122.3 \
+       --location-presentation off 2>&1); PRC=$?
+ok "off is rejected" "$PRC" "1"
+ok "off explains itself" "$(printf '%s' "$POUT" | grep -c 'not supported')" "1"
+ok "off wrote nothing" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZISHIDDEN=1;")" "0"
 LOUT2=$("$CLI" --db "$DB" write --body "Big map." --lat 47.6 --lon -122.3 --location-presentation large 2>&1)
 LPK2=$(echo "$LOUT2" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 ok "large location is visible" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$LPK2;")" "0"
 ok "large location is not slim" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$LPK2;")" "0"
+ok "no asset is ever hidden" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZISHIDDEN=1;")" "0"
+
+echo "T3b repair-locations"
+# Simulate a 1.2.0 import, then repair it in place.
+RPK=$(sqlite3 "$DB" "select ZENTRY from ZJOURNALENTRYASSETMO where ZASSETTYPE='multiPinMap' limit 1;")
+# Mark both rows as already synced, the way a 1.2.0 import looks once Journal
+# has uploaded it -- otherwise the re-upload assertions below prove nothing.
+sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1, ZISSLIM=0, ZISUPLOADEDTOCLOUD=1 where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';"
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$RPK;"
+ok "setup: asset starts synced" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
+ok "dry run reports the damage" "$("$CLI" --db "$DB" repair-locations --dry-run 2>&1 | grep -c 'would repair 1 hidden map asset')" "1"
+ok "dry run wrote nothing" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
+"$CLI" --db "$DB" repair-locations >/dev/null 2>&1
+ok "repair clears hidden" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "0"
+ok "repair defaults to small" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
+ok "repair re-uploads the entry" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$RPK;")" "0"
+# The asset syncs on its own flag; clearing only the entry's leaves the repair
+# local and other devices keep the hidden map.
+ok "repair re-uploads the asset" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "0"
+ok "repair keeps the coordinates" "$("$CLI" --db "$DB" show $RPK --json | jq_ '[p for a in d["assets"] for p in a.get("places",[])] != []')" "True"
+ok "repair is idempotent" "$("$CLI" --db "$DB" repair-locations 2>&1 | grep -c 'Nothing to repair')" "1"
+sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1 where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';"
+"$CLI" --db "$DB" repair-locations --to large >/dev/null 2>&1
+ok "repair --to large" "$(sqlite3 "$DB" "select ZISSLIM || ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "00"
 
 echo "T4 media"
 MOUT=$("$CLI" --db "$DB" write --body "With pictures." --media "$IMG" "$MOV" 2>&1)
@@ -148,7 +175,9 @@ ok "location reads back" "$("$CLI" --db "$DB" show $EPK --json | jq_ '[p for a i
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --place "Eiffel Tower" >/dev/null 2>&1
 ok "location replaced not duplicated" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation off >/dev/null 2>&1
-ok "edit can hide location" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
+ok "edit refuses to hide location" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "0"
+"$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation small >/dev/null 2>&1
+ok "edit can shrink location" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation large >/dev/null 2>&1
 ok "edit can enlarge location" "$(sqlite3 "$DB" "select ZISSLIM || ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "00"
 "$CLI" --db "$DB" edit $EPK --add-media "$IMG" >/dev/null 2>&1
@@ -261,8 +290,12 @@ if [ "$NJ" -ge 2 ]; then
   TJPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where ZMERGEABLEATTRIBUTES is not null limit 1;")
   TJOPT=$(sqlite3 "$DB" "select Z_OPT from ZJOURNALMO where Z_PK=$TJPK;")
   ok "journals lists both" "$("$CLI" --db "$DB" journals --json | jq_ 'len(d)')" "$NJ"
-  ok "name resolved from CRDT" "$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$TJPK'][0]["name"]')" "Test Journal"
-  JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "Test Journal" 2>&1)
+  # The name lives inside the journal's CRDT blob, not in a column, so the only
+  # thing we can assert seed-independently is that one came back. The synthetic
+  # fixture calls it "Test Journal"; a real store calls it whatever you named it.
+  TJ=$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$TJPK'][0]["name"]')
+  ok "name resolved from CRDT" "$([ -n "$TJ" ] && [ "$TJ" != "None" ] && echo resolved || echo "empty")" "resolved"
+  JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "$TJ" 2>&1)
   JPK=$(echo "$JOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "join row written" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$JPK;")" "$TJPK"
   ok "write warns membership is local staging" "$(echo "$JOUT" | grep -c 'Mac-local staging membership')" "1"
@@ -273,19 +306,19 @@ if [ "$NJ" -ge 2 ]; then
   ok "default write has no join row" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
   ok "default write has no staging warning" "$(echo "$DOUT" | grep -c 'Mac-local staging membership')" "0"
   sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
-  EOUT=$("$CLI" --db "$DB" edit $DPK --journal "Test Journal" 2>&1)
+  EOUT=$("$CLI" --db "$DB" edit $DPK --journal "$TJ" 2>&1)
   ok "edit stages an unsynced entry in journal" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "$TJPK"
   ok "edit warns membership is local staging" "$(echo "$EOUT" | grep -c 'Mac-local staging membership')" "1"
   ok "staged move does not fake a journal upload" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
   "$CLI" --db "$DB" edit $DPK --journal 1 >/dev/null 2>&1
   ok "edit moves back to default (join row dropped)" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
   sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=X'01' where Z_PK=$DPK;"
-  "$CLI" --db "$DB" edit $DPK --journal "Test Journal" >/dev/null 2>&1
+  "$CLI" --db "$DB" edit $DPK --journal "$TJ" >/dev/null 2>&1
   ok "direct journal move refused for CRDT entry" "$?" "1"
   ok "refused CRDT move is unchanged" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
   sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=NULL where Z_PK=$DPK;"
-  AUDIT=$("$CLI" --db "$DB" sync-journals --journal "Test Journal" 2>&1)
-  ok "sync-journals finds local-only membership" "$(echo "$AUDIT" | grep -Ec 'Test Journal: [1-9][0-9]* entr(y|ies)')" "1"
+  AUDIT=$("$CLI" --db "$DB" sync-journals --journal "$TJ" 2>&1)
+  ok "sync-journals finds local-only membership" "$(echo "$AUDIT" | grep -F "$TJ:" | grep -Ec '[1-9][0-9]* entr(y|ies)')" "1"
   ok "sync-journals gives native move instructions" "$(echo "$AUDIT" | grep -c 'Select Entries > Select All')" "1"
   ok "sync-journals is read-only" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
   "$CLI" --db "$DB" write --body x --journal "No Such Journal" >/dev/null 2>&1

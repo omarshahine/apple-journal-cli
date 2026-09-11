@@ -80,15 +80,16 @@ copy of the real store; `--target-db` points the import at it and no
 ```sh
 DB=$(journal-cli sandbox --dir /tmp/rehearsal)
 python3 $S import "Photography" --into "Day One - Photography" \
-        --export ~/export/Photography --location-presentation off --target-db "$DB"
+        --export ~/export/Photography --location-presentation large --target-db "$DB"
 journal-cli --db "$DB" journals --json      # verify counts, then spot-check
 ```
 
 Then replay the identical command without `--target-db`.
 
-`--location-presentation` controls the imported location card: `off` keeps
-the location in Journal's Places index without showing a map in the entry;
-`small` (the default) and `large` show the compact or expanded map card.
+`--location-presentation` sets the size of the imported location card:
+`small` (the default) is the compact map, `large` the expanded one. There is
+no `off`: Journal keeps a hidden map only in the entry's own CRDT, which
+journal-cli does not write. See the README's "Why there is no location `off`".
 
 `--into` is a staging journal on this Mac. Direct Core Data relationships do
 not create Journal's per-entry iCloud merge data, so they can look correct on

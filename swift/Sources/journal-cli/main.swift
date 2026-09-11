@@ -24,17 +24,21 @@ WRITE (guarded: --live required against the real store; auto-backup first)
             [--markdown]
             [--media PATH...] [--live-photo IMAGE VIDEO] [--no-resize]
             [--photos-link] [--link URL] [--link-title T]
-            [--lat N --lon N] [--place P] [--city C] [--location-presentation off|small|large]
+            [--lat N --lon N] [--place P] [--city C] [--location-presentation small|large]
             [--journal NAME] [--live]
   edit      <id> [--title T] [--body B] [--body-file F] [--body-rtf F] [--date D]
             [--bookmark | --no-bookmark] [--add-media PATH...] [--no-resize]
             [--photos-link] [--add-link URL] [--link-title T]
-            [--lat N --lon N] [--place P] [--city C] [--clear-location]
+            [--lat N --lon N] [--place P] [--city C] [--location-presentation small|large]
+            [--clear-location]
             [--remove-media ID...] [--remove-all-media]
             [--journal NAME] [--force] [--live]
   delete    <id> [--hard] [--force] [--live]
   restore   <id> [--live]
   empty     [--force] [--live]
+  repair-locations [--to small|large] [--live]
+            restore map assets that journal-cli 1.2.0 wrote with
+            --location-presentation off (Journal reads those as no location)
   sync-journals [--journal NAME]
             audit Mac-local memberships and print the native sync repair steps
   sandbox   --dir DIR [--from DB]      copy the store somewhere safe for testing
@@ -72,7 +76,7 @@ let boolFlags: Set<String> = ["--json", "--full", "--include-empty", "--bookmark
 let valueFlags: Set<String> = ["--limit", "--since", "--until", "--dir", "--format",
                                "--title", "--body", "--body-file", "--body-rtf", "--date",
                                "--lat", "--lon", "--place", "--city", "--location-presentation", "--journal",
-                               "--link", "--link-title", "--add-link", "--from"]
+                               "--link", "--link-title", "--add-link", "--from", "--to"]
 let listFlags: Set<String> = ["--media", "--add-media", "--live-photo", "--remove-media"]
 
 let a = Args(rest, listFlags: listFlags, valueFlags: valueFlags, boolFlags: boolFlags)
@@ -91,6 +95,7 @@ case "edit":     cmdEdit(a)
 case "delete":   cmdDelete(a)
 case "restore":  cmdRestore(a)
 case "empty":    cmdEmpty(a)
+case "repair-locations": cmdRepairLocations(a)
 case "sync-journals": cmdSyncJournals(a)
 case "sandbox":  cmdSandbox(a)
 case "render":   cmdRender(a)

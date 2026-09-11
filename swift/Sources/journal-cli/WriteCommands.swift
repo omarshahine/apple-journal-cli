@@ -48,18 +48,28 @@ private func warnStagingJournal() {
             .data(using: .utf8)!)
 }
 
-/// Journal represents the three location-card choices as two asset flags.
-/// A hidden map remains attached to the entry and in the Places index.
-private func locationPresentation(_ a: Args, hasLocation: Bool) -> (slim: Int, hidden: Int) {
-    let presentation = a.value("--location-presentation") ?? "small"
-    guard hasLocation || a.value("--location-presentation") == nil else {
-        die("--location-presentation needs --lat and --lon")
-    }
+/// Journal stores a map card's size in the asset row (ZISSLIM), but stores
+/// "Off" only in the entry's own CRDT, under `hiddenAssetIDs` — the asset row
+/// of a hidden map is byte-identical to a large one (ZISSLIM=0, ZISHIDDEN=0).
+/// Verified against a live store: across 5,000+ assets Journal never sets
+/// ZISHIDDEN, and on every entry whose CRDT carries `hiddenAssetIDs` the asset
+/// rows still read ZISHIDDEN=0. Setting ZISHIDDEN=1 ourselves does not hide the
+/// card — it drops the location out of Journal entirely, Places included.
+/// We do not author CRDTs, so "off" is not ours to write.
+private func locationSlim(_ a: Args, hasLocation: Bool) -> Int {
+    guard let presentation = a.value("--location-presentation") else { return 1 }
+    guard hasLocation else { die("--location-presentation needs --lat and --lon") }
     switch presentation {
-    case "off": return (0, 1)
-    case "small": return (1, 0)
-    case "large": return (0, 0)
-    default: die("--location-presentation must be off, small, or large")
+    case "small": return 1
+    case "large": return 0
+    case "off":
+        die("--location-presentation off is not supported.\n"
+            + "  Journal records a hidden map only in the entry's CRDT, which\n"
+            + "  journal-cli does not write. Earlier builds approximated it with\n"
+            + "  ZISHIDDEN=1, which makes Journal drop the location altogether —\n"
+            + "  no map card AND no Places entry. Use small or large.\n"
+            + "  To fix entries written that way: journal-cli repair-locations")
+    default: die("--location-presentation must be small or large")
     }
 }
 
@@ -100,7 +110,7 @@ func cmdWrite(_ a: Args) {
     let lat = a.double("--lat"), lon = a.double("--lon")
     let hasLoc = lat != nil || lon != nil
     if hasLoc && (lat == nil || lon == nil) { die("--lat and --lon must be given together") }
-    let locationPresentation = locationPresentation(a, hasLocation: hasLoc)
+    let locationSlim = locationSlim(a, hasLocation: hasLoc)
     let link = a.value("--link")
     let hasText = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     let title = a.value("--title").map { a.has("--markdown") ? markdownToInlinePlain($0) : $0 }
@@ -199,8 +209,7 @@ func cmdWrite(_ a: Args) {
             let (_, au) = addAsset(db, entryPK: pk, entryUUID: entryUUID,
                                    type: "multiPinMap", source: "locationPicker",
                                    metadata: ["revision": 2, "visitsData": [visit]],
-                                   slim: locationPresentation.slim,
-                                   hidden: locationPresentation.hidden)
+                                   slim: locationSlim)
             ordering.append(au)
         }
         if !ordering.isEmpty { orderingAppend(db, pk, ordering) }
@@ -245,7 +254,7 @@ func cmdEdit(_ a: Args) {
     let lat = a.double("--lat"), lon = a.double("--lon")
     let hasLoc = lat != nil || lon != nil
     if hasLoc && (lat == nil || lon == nil) { die("--lat and --lon must be given together") }
-    let locationPresentation = locationPresentation(a, hasLocation: hasLoc)
+    let locationSlim = locationSlim(a, hasLocation: hasLoc)
     let bookmark: Bool? = a.has("--bookmark") ? true : (a.has("--no-bookmark") ? false : nil)
     let touchesText = body != nil || title != nil
     let removeMedia = a.values("--remove-media").compactMap { Int64($0) }
@@ -367,8 +376,7 @@ func cmdEdit(_ a: Args) {
             let (_, au) = addAsset(db, entryPK: pk, entryUUID: entryUUID ?? uid(),
                                    type: "multiPinMap", source: "locationPicker",
                                    metadata: ["revision": 2, "visitsData": [visit]],
-                                   slim: locationPresentation.slim,
-                                   hidden: locationPresentation.hidden)
+                                   slim: locationSlim)
             added.append(au)
         }
         if !added.isEmpty { orderingAppend(db, pk, added) }
@@ -546,6 +554,62 @@ For each journal above:
 
 This command is read-only. --live and --dry-run are accepted for compatibility.
 """)
+}
+
+// Undo the ZISHIDDEN=1 map assets written by journal-cli 1.2.0's
+// `--location-presentation off`. Journal reads such an asset as absent, so the
+// entry shows no map AND no place — but the coordinates are still in the row,
+// so this repairs in place rather than needing a re-import.
+func cmdRepairLocations(_ a: Args) {
+    let mode = a.value("--to") ?? "small"
+    guard mode == "small" || mode == "large" else { die("--to must be small or large") }
+    let slim = mode == "small" ? 1 : 0
+
+    let find = """
+        select Z_PK, ZENTRY from ZJOURNALENTRYASSETMO
+        where ZASSETTYPE='multiPinMap' and coalesce(ZISHIDDEN,0)=1
+        order by ZENTRY
+        """
+    if a.has("--dry-run") {
+        let rows = withSnapshot { db in db.query(find, []) }
+        let entries = Set(rows.compactMap { $0.i("ZENTRY") })
+        print("DRY RUN: would repair \(rows.count) hidden map asset(s) "
+              + "across \(entries.count) entr\(entries.count == 1 ? "y" : "ies") "
+              + "to '\(mode)'. Nothing written.")
+        return
+    }
+
+    let (assets, entries): (Int, Int) = withLive(allowLiveDefault: a.has("--live"),
+                                                 acceptRisk: a.has("--accept-risk")) { db in
+        let rows = db.query(find, [])
+        let entryPKs = Set(rows.compactMap { $0.i("ZENTRY") })
+        for r in rows {
+            guard let apk = r.i("Z_PK") else { continue }
+            // The asset carries its own upload flag and Journal's sync engine
+            // honors it, so clearing the entry's alone would leave the fix
+            // local -- other devices would keep the hidden map. Not
+            // ZUPDATEDDATE: assets only gained that column on newer stores.
+            db.exec("""
+                update ZJOURNALENTRYASSETMO
+                set ZISHIDDEN=0, ZISSLIM=?, ZISUPLOADEDTOCLOUD=0 where Z_PK=?
+                """, [slim, apk])
+        }
+        // Re-upload the entries so the corrected assets reach the other devices.
+        for epk in entryPKs {
+            db.exec("""
+                update ZJOURNALENTRYMO
+                set ZUPDATEDDATE=?, ZENTRYDATAUPDATEDATE=?, ZISUPLOADEDTOCLOUD=0
+                where Z_PK=?
+                """, [cdNow(), cdNow(), epk])
+        }
+        return (rows.count, entryPKs.count)
+    }
+    if assets == 0 {
+        print("No hidden map assets found. Nothing to repair.")
+        return
+    }
+    print("Repaired \(assets) map asset(s) across \(entries) "
+          + "entr\(entries == 1 ? "y" : "ies") to '\(mode)'.")
 }
 
 func cmdSandbox(_ a: Args) {
