@@ -283,8 +283,12 @@ if [ "$NJ" -ge 2 ]; then
   TJPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where ZMERGEABLEATTRIBUTES is not null limit 1;")
   TJOPT=$(sqlite3 "$DB" "select Z_OPT from ZJOURNALMO where Z_PK=$TJPK;")
   ok "journals lists both" "$("$CLI" --db "$DB" journals --json | jq_ 'len(d)')" "$NJ"
-  ok "name resolved from CRDT" "$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$TJPK'][0]["name"]')" "Test Journal"
-  JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "Test Journal" 2>&1)
+  # The name lives inside the journal's CRDT blob, not in a column, so the only
+  # thing we can assert seed-independently is that one came back. The synthetic
+  # fixture calls it "Test Journal"; a real store calls it whatever you named it.
+  TJ=$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$TJPK'][0]["name"]')
+  ok "name resolved from CRDT" "$([ -n "$TJ" ] && [ "$TJ" != "None" ] && echo resolved || echo "empty")" "resolved"
+  JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "$TJ" 2>&1)
   JPK=$(echo "$JOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "join row written" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$JPK;")" "$TJPK"
   ok "write warns membership is local staging" "$(echo "$JOUT" | grep -c 'Mac-local staging membership')" "1"
@@ -295,19 +299,19 @@ if [ "$NJ" -ge 2 ]; then
   ok "default write has no join row" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
   ok "default write has no staging warning" "$(echo "$DOUT" | grep -c 'Mac-local staging membership')" "0"
   sqlite3 "$DB" "update ZJOURNALMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$TJPK;"
-  EOUT=$("$CLI" --db "$DB" edit $DPK --journal "Test Journal" 2>&1)
+  EOUT=$("$CLI" --db "$DB" edit $DPK --journal "$TJ" 2>&1)
   ok "edit stages an unsynced entry in journal" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "$TJPK"
   ok "edit warns membership is local staging" "$(echo "$EOUT" | grep -c 'Mac-local staging membership')" "1"
   ok "staged move does not fake a journal upload" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
   "$CLI" --db "$DB" edit $DPK --journal 1 >/dev/null 2>&1
   ok "edit moves back to default (join row dropped)" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
   sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=X'01' where Z_PK=$DPK;"
-  "$CLI" --db "$DB" edit $DPK --journal "Test Journal" >/dev/null 2>&1
+  "$CLI" --db "$DB" edit $DPK --journal "$TJ" >/dev/null 2>&1
   ok "direct journal move refused for CRDT entry" "$?" "1"
   ok "refused CRDT move is unchanged" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$DPK;")" "0"
   sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=NULL where Z_PK=$DPK;"
-  AUDIT=$("$CLI" --db "$DB" sync-journals --journal "Test Journal" 2>&1)
-  ok "sync-journals finds local-only membership" "$(echo "$AUDIT" | grep -Ec 'Test Journal: [1-9][0-9]* entr(y|ies)')" "1"
+  AUDIT=$("$CLI" --db "$DB" sync-journals --journal "$TJ" 2>&1)
+  ok "sync-journals finds local-only membership" "$(echo "$AUDIT" | grep -F "$TJ:" | grep -Ec '[1-9][0-9]* entr(y|ies)')" "1"
   ok "sync-journals gives native move instructions" "$(echo "$AUDIT" | grep -c 'Select Entries > Select All')" "1"
   ok "sync-journals is read-only" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALMO where Z_PK=$TJPK;")" "1"
   "$CLI" --db "$DB" write --body x --journal "No Such Journal" >/dev/null 2>&1

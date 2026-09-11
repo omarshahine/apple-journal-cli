@@ -51,6 +51,8 @@ Security), then:
 journal-cli doctor
 ```
 
+Release history and upgrade notes: [CHANGELOG.md](CHANGELOG.md).
+
 ## Reading
 
 Reads run against a temp snapshot of the store, so they are safe while
@@ -221,7 +223,9 @@ Every write path has been verified against a real library on macOS 26:
 Journal.app renders CLI-written text, photos, Live Photos (labeled as such),
 link cards, and location pins (which also feed its Places index); the sync
 engine uploads them all to CloudKit — including the attachment files — and a
-delete/restore round trip propagates. The read pipeline has been swept over an
+delete/restore round trip propagates. Map cards were checked against the app's
+three modes: `small` and `large` are reproducible from the asset row, `off` is
+not (see "Why there is no location `off`"). The read pipeline has been swept over an
 entire real store: every entry row and all ~700 asset metadata blobs parse.
 
 The test suite (`tests/test_write.sh`) runs the whole command
@@ -229,7 +233,9 @@ surface against a disposable copy of a store — argument guards, insert
 bookkeeping, RTF round-trips, location metadata, media file layout, Live Photo
 pairing, Photos linkage, journal targeting, link assets, the delete/restore
 lifecycle, and `PRAGMA integrity_check`. Point `JOURNAL_SEED` at a backup to
-run it without Full Disk Access. `JOURNAL_CLI` selects the binary under test;
+run it without Full Disk Access, or point it at `tests/make-fixture.sh`'s
+synthetic store to run with no Journal library at all (what CI does); the suite
+is seed-independent and passes either way. `JOURNAL_CLI` selects the binary under test;
 the Python implementation in `reference/` remains an executable reference for
 the original command surface.
 

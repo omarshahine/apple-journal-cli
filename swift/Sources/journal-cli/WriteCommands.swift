@@ -585,8 +585,10 @@ func cmdRepairLocations(_ a: Args) {
         let entryPKs = Set(rows.compactMap { $0.i("ZENTRY") })
         for r in rows {
             guard let apk = r.i("Z_PK") else { continue }
-            db.exec("update ZJOURNALENTRYASSETMO set ZISHIDDEN=0, ZISSLIM=?, ZUPDATEDDATE=? where Z_PK=?",
-                    [slim, cdNow(), apk])
+            // Not ZUPDATEDDATE: assets only gained that column on newer
+            // stores, and the entry-level bump below is what drives re-sync.
+            db.exec("update ZJOURNALENTRYASSETMO set ZISHIDDEN=0, ZISSLIM=? where Z_PK=?",
+                    [slim, apk])
         }
         // Re-upload the entries so the corrected assets reach the other devices.
         for epk in entryPKs {
