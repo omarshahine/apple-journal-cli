@@ -105,13 +105,20 @@ ok "no asset is ever hidden" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTR
 echo "T3b repair-locations"
 # Simulate a 1.2.0 import, then repair it in place.
 RPK=$(sqlite3 "$DB" "select ZENTRY from ZJOURNALENTRYASSETMO where ZASSETTYPE='multiPinMap' limit 1;")
-sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1, ZISSLIM=0 where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';"
+# Mark both rows as already synced, the way a 1.2.0 import looks once Journal
+# has uploaded it -- otherwise the re-upload assertions below prove nothing.
+sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1, ZISSLIM=0, ZISUPLOADEDTOCLOUD=1 where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';"
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$RPK;"
+ok "setup: asset starts synced" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
 ok "dry run reports the damage" "$("$CLI" --db "$DB" repair-locations --dry-run 2>&1 | grep -c 'would repair 1 hidden map asset')" "1"
 ok "dry run wrote nothing" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
 "$CLI" --db "$DB" repair-locations >/dev/null 2>&1
 ok "repair clears hidden" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "0"
 ok "repair defaults to small" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
 ok "repair re-uploads the entry" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$RPK;")" "0"
+# The asset syncs on its own flag; clearing only the entry's leaves the repair
+# local and other devices keep the hidden map.
+ok "repair re-uploads the asset" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "0"
 ok "repair keeps the coordinates" "$("$CLI" --db "$DB" show $RPK --json | jq_ '[p for a in d["assets"] for p in a.get("places",[])] != []')" "True"
 ok "repair is idempotent" "$("$CLI" --db "$DB" repair-locations 2>&1 | grep -c 'Nothing to repair')" "1"
 sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1 where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';"

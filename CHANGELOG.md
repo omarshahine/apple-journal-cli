@@ -37,8 +37,9 @@ journal-cli repair-locations --live            # restore as small maps
 journal-cli repair-locations --to large --live
 ```
 
-It also clears `ZISUPLOADEDTOCLOUD` on the affected entries so the corrected
-assets reach your other devices.
+It also clears `ZISUPLOADEDTOCLOUD` on both the repaired assets and their
+entries, so the correction reaches your other devices rather than staying
+local.
 
 ### Fixed — test suite no longer depends on the seed store
 

@@ -1160,10 +1160,13 @@ def cmd_repair_locations(a):
         rows = conn.execute(find).fetchall()
         entries = {r["ZENTRY"] for r in rows}
         for r in rows:
-            # Not ZUPDATEDDATE: assets only gained that column on newer
-            # stores, and the entry-level bump below is what drives re-sync.
+            # The asset carries its own upload flag and Journal's sync engine
+            # honors it, so clearing the entry's alone would leave the fix
+            # local -- other devices would keep the hidden map. Not
+            # ZUPDATEDDATE: assets only gained that column on newer stores.
             conn.execute("""update ZJOURNALENTRYASSETMO
-                            set ZISHIDDEN=0, ZISSLIM=? where Z_PK=?""",
+                            set ZISHIDDEN=0, ZISSLIM=?, ZISUPLOADEDTOCLOUD=0
+                            where Z_PK=?""",
                          (slim, r["Z_PK"]))
         # Re-upload the entries so the corrected assets reach the other devices.
         for epk in entries:
