@@ -88,15 +88,35 @@ ok "city" "$("$CLI" --db "$DB" show $LPK --json | jq_ 'd["assets"][0]["places"][
 ok "asset parented to entry" "$(sqlite3 "$DB" "select hex(a.ZPARENTID)=hex(e.ZID) from ZJOURNALENTRYASSETMO a join ZJOURNALENTRYMO e on e.Z_PK=a.ZENTRY where a.ZENTRY=$LPK;")" "1"
 
 echo "T3a location presentation"
-POUT=$("$CLI" --db "$DB" write --body "Private location." --lat 47.6 --lon -122.3 --location-presentation off 2>&1)
-PPK=$(echo "$POUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
-ok "off location remains an asset" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$PPK and ZASSETTYPE='multiPinMap';")" "1"
-ok "off location is hidden" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "1"
-ok "off location is not slim" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "0"
+# Journal keeps a map's Off state in the entry CRDT (hiddenAssetIDs), never in
+# the asset row, and reads ZISHIDDEN=1 as "no such asset" -- which loses the
+# location from Places too. So `off` must be refused, not approximated.
+POUT=$("$CLI" --db "$DB" write --body "Private location." --lat 47.6 --lon -122.3 \
+       --location-presentation off 2>&1); PRC=$?
+ok "off is rejected" "$PRC" "1"
+ok "off explains itself" "$(printf '%s' "$POUT" | grep -c 'not supported')" "1"
+ok "off wrote nothing" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZISHIDDEN=1;")" "0"
 LOUT2=$("$CLI" --db "$DB" write --body "Big map." --lat 47.6 --lon -122.3 --location-presentation large 2>&1)
 LPK2=$(echo "$LOUT2" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 ok "large location is visible" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$LPK2;")" "0"
 ok "large location is not slim" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$LPK2;")" "0"
+ok "no asset is ever hidden" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZISHIDDEN=1;")" "0"
+
+echo "T3b repair-locations"
+# Simulate a 1.2.0 import, then repair it in place.
+RPK=$(sqlite3 "$DB" "select ZENTRY from ZJOURNALENTRYASSETMO where ZASSETTYPE='multiPinMap' limit 1;")
+sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1, ZISSLIM=0 where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';"
+ok "dry run reports the damage" "$("$CLI" --db "$DB" repair-locations --dry-run 2>&1 | grep -c 'would repair 1 hidden map asset')" "1"
+ok "dry run wrote nothing" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
+"$CLI" --db "$DB" repair-locations >/dev/null 2>&1
+ok "repair clears hidden" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "0"
+ok "repair defaults to small" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "1"
+ok "repair re-uploads the entry" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$RPK;")" "0"
+ok "repair keeps the coordinates" "$("$CLI" --db "$DB" show $RPK --json | jq_ '[p for a in d["assets"] for p in a.get("places",[])] != []')" "True"
+ok "repair is idempotent" "$("$CLI" --db "$DB" repair-locations 2>&1 | grep -c 'Nothing to repair')" "1"
+sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1 where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';"
+"$CLI" --db "$DB" repair-locations --to large >/dev/null 2>&1
+ok "repair --to large" "$(sqlite3 "$DB" "select ZISSLIM || ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$RPK and ZASSETTYPE='multiPinMap';")" "00"
 
 echo "T4 media"
 MOUT=$("$CLI" --db "$DB" write --body "With pictures." --media "$IMG" "$MOV" 2>&1)
@@ -148,7 +168,9 @@ ok "location reads back" "$("$CLI" --db "$DB" show $EPK --json | jq_ '[p for a i
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --place "Eiffel Tower" >/dev/null 2>&1
 ok "location replaced not duplicated" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation off >/dev/null 2>&1
-ok "edit can hide location" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
+ok "edit refuses to hide location" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "0"
+"$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation small >/dev/null 2>&1
+ok "edit can shrink location" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation large >/dev/null 2>&1
 ok "edit can enlarge location" "$(sqlite3 "$DB" "select ZISSLIM || ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "00"
 "$CLI" --db "$DB" edit $EPK --add-media "$IMG" >/dev/null 2>&1

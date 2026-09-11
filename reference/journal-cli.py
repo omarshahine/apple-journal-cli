@@ -615,7 +615,25 @@ def next_pk(conn, kind):
     conn.execute("update Z_PRIMARYKEY set Z_MAX=? where Z_NAME=?", (pk, name))
     return row["Z_ENT"], pk
 
-def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0, hidden=0):
+# Journal stores a map card's size in the asset row (ZISSLIM), but stores "Off"
+# only in the entry's own CRDT, under `hiddenAssetIDs` — the asset row of a
+# hidden map is byte-identical to a large one (ZISSLIM=0, ZISHIDDEN=0). Setting
+# ZISHIDDEN=1 does not hide the card; Journal drops the location entirely,
+# Places included. We do not author CRDTs, so "off" is not ours to write.
+def location_slim(a, has_loc):
+    if a.location_presentation is None:
+        return 1
+    if not has_loc:
+        die("--location-presentation needs --lat and --lon")
+    if a.location_presentation == "off":
+        die("--location-presentation off is not supported.\n"
+            "  Journal records a hidden map only in the entry's CRDT, which\n"
+            "  journal-cli does not write. Earlier builds approximated it with\n"
+            "  ZISHIDDEN=1, which makes Journal drop the location altogether —\n"
+            "  no map card AND no Places entry. Use small or large.")
+    return 1 if a.location_presentation == "small" else 0
+
+def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0):
     ent, pk = next_pk(conn, "asset")
     au = uid()
     conn.execute("""
@@ -624,9 +642,9 @@ def add_asset(conn, entry_pk, entry_uuid, asset_type, source, metadata, slim=0, 
            ZCREATEDDATE, ZASSETMETADATA, ZISSLIM, ZISHIDDEN, ZISBEINGEDITED,
            ZISUNDOABLYDELETED, ZISUPLOADEDTOCLOUD, ZISREMOVEDFROMCLOUD,
            ZREFRESHASSETMETADATA, ZMINIMUMSUPPORTEDAPPVERSION)
-        values (?,?,1,?,?,?,?,?,?,?,?,?,0,0,0,0,0,0)""",
+        values (?,?,1,?,?,?,?,?,?,?,?,0,0,0,0,0,0,0)""",
         (pk, ent, entry_pk, uid_bytes(au), uid_bytes(entry_uuid), asset_type, source,
-         cd_now(), meta_blob(metadata) if metadata is not None else None, slim, hidden))
+         cd_now(), meta_blob(metadata) if metadata is not None else None, slim))
     return pk, au
 
 def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index,
@@ -673,10 +691,7 @@ def cmd_write(a):
     has_loc = a.lat is not None or a.lon is not None
     if has_loc and (a.lat is None or a.lon is None):
         die("--lat and --lon must be given together")
-    if a.location_presentation and not has_loc:
-        die("--location-presentation needs --lat and --lon")
-    presentation = a.location_presentation or "small"
-    slim, hidden = {"off": (0, 1), "small": (1, 0), "large": (0, 0)}[presentation]
+    slim = location_slim(a, has_loc)
     if not (body and body.strip()) and not media and not lp and not has_loc and not a.link:
         die("nothing to write (need --body/--body-file/stdin, --media, --live-photo, "
             "--link, or --lat/--lon)")
@@ -756,7 +771,7 @@ def cmd_write(a):
             if a.place: visit["placeName"] = a.place
             if a.city:  visit["city"] = a.city
             _, au = add_asset(conn, pk, entry_uuid, "multiPinMap", "locationPicker",
-                              {"revision": 2, "visitsData": [visit]}, slim=slim, hidden=hidden)
+                              {"revision": 2, "visitsData": [visit]}, slim=slim)
             ordering += [au, idx]
 
         if ordering:
@@ -842,10 +857,7 @@ def cmd_edit(a):
     has_loc = a.lat is not None or a.lon is not None
     if has_loc and (a.lat is None or a.lon is None):
         die("--lat and --lon must be given together")
-    if a.location_presentation and not has_loc:
-        die("--location-presentation needs --lat and --lon")
-    presentation = a.location_presentation or "small"
-    slim, hidden = {"off": (0, 1), "small": (1, 0), "large": (0, 0)}[presentation]
+    slim = location_slim(a, has_loc)
     bookmark = True if a.bookmark else (False if a.no_bookmark else None)
     touches_text = body is not None or a.title is not None
     if not any([touches_text, media, has_loc, a.clear_location, a.add_link,
@@ -932,7 +944,7 @@ def cmd_edit(a):
             if a.place: visit["placeName"] = a.place
             if a.city:  visit["city"] = a.city
             _, au = add_asset(conn, a.id, entry_uuid, "multiPinMap", "locationPicker",
-                              {"revision": 2, "visitsData": [visit]}, slim=slim, hidden=hidden)
+                              {"revision": 2, "visitsData": [visit]}, slim=slim)
             added.append(au)
 
         if a.add_link:
@@ -1123,6 +1135,45 @@ For each journal above:
 
 This command is read-only. --live and --dry-run are accepted for compatibility.""")
 
+def cmd_repair_locations(a):
+    """Undo the ZISHIDDEN=1 map assets written by 1.2.0's --location-presentation off.
+
+    Journal reads such an asset as absent, so the entry shows no map AND no
+    place — but the coordinates are still in the row, so this repairs in place
+    rather than needing a re-import.
+    """
+    if a.to not in ("small", "large"):
+        die("--to must be small or large")
+    slim = 1 if a.to == "small" else 0
+    find = """select Z_PK, ZENTRY from ZJOURNALENTRYASSETMO
+              where ZASSETTYPE='multiPinMap' and coalesce(ZISHIDDEN,0)=1
+              order by ZENTRY"""
+    if a.dry_run:
+        with Snapshot() as c:
+            rows = c.execute(find).fetchall()
+        entries = {r["ZENTRY"] for r in rows}
+        print(f"DRY RUN: would repair {len(rows)} hidden map asset(s) across "
+              f"{len(entries)} entr{'y' if len(entries) == 1 else 'ies'} "
+              f"to '{a.to}'. Nothing written.")
+        return
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
+        rows = conn.execute(find).fetchall()
+        entries = {r["ZENTRY"] for r in rows}
+        for r in rows:
+            conn.execute("""update ZJOURNALENTRYASSETMO
+                            set ZISHIDDEN=0, ZISSLIM=?, ZUPDATEDDATE=? where Z_PK=?""",
+                         (slim, cd_now(), r["Z_PK"]))
+        # Re-upload the entries so the corrected assets reach the other devices.
+        for epk in entries:
+            conn.execute("""update ZJOURNALENTRYMO
+                            set ZUPDATEDDATE=?, ZENTRYDATAUPDATEDATE=?, ZISUPLOADEDTOCLOUD=0
+                            where Z_PK=?""", (cd_now(), cd_now(), epk))
+    if not rows:
+        print("No hidden map assets found. Nothing to repair.")
+        return
+    print(f"Repaired {len(rows)} map asset(s) across {len(entries)} "
+          f"entr{'y' if len(entries) == 1 else 'ies'} to '{a.to}'.")
+
 def cmd_sandbox(a):
     """Seed a throwaway store. --from lets tests run off a backup without FDA."""
     src = os.path.expanduser(a.source) if a.source else DEFAULT_DB
@@ -1202,7 +1253,8 @@ def main():
     w.add_argument("--place", help="place name for the location pin")
     w.add_argument("--city")
     w.add_argument("--location-presentation", choices=["off", "small", "large"],
-                   help="show the location in the entry as off, small, or large (default: small)")
+                   help="show the location in the entry as a small or large map "
+                        "(default: small); off is not supported, see --help output")
     w.add_argument("--link", metavar="URL", help="attach a web link")
     w.add_argument("--link-title", help="title for --link (default: none)")
     w.add_argument("--journal", help="journal name or id (default: the app's default journal)")
@@ -1226,7 +1278,8 @@ def main():
     ed.add_argument("--lat", type=float); ed.add_argument("--lon", type=float)
     ed.add_argument("--place"); ed.add_argument("--city")
     ed.add_argument("--location-presentation", choices=["off", "small", "large"],
-                    help="show the replacement location as off, small, or large (default: small)")
+                    help="show the replacement location as a small or large map "
+                         "(default: small); off is not supported")
     ed.add_argument("--clear-location", action="store_true")
     ed.add_argument("--add-link", metavar="URL")
     ed.add_argument("--link-title")
@@ -1262,6 +1315,15 @@ def main():
     sj.add_argument("--accept-risk", dest="accept_risk", action="store_true")
     sj.add_argument("--live", action="store_true")
     sj.set_defaults(func=cmd_sync_journals)
+
+    rl = sub.add_parser("repair-locations",
+                        help="restore map assets written with --location-presentation off")
+    rl.add_argument("--to", choices=["small", "large"], default="small",
+                    help="map size to restore them to (default: small)")
+    rl.add_argument("--dry-run", action="store_true")
+    rl.add_argument("--accept-risk", action="store_true")
+    rl.add_argument("--live", action="store_true")
+    rl.set_defaults(func=cmd_repair_locations)
 
     d = sub.add_parser("delete"); d.add_argument("id", type=int)
     d.add_argument("--hard", action="store_true")

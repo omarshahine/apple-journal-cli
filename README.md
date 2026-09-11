@@ -97,7 +97,7 @@ journal-cli write --live --body "Golden hour" --live-photo IMG_0123.heic IMG_012
 # location pin
 journal-cli write --live --body "At the office" \
     --lat 47.62055 --lon -122.34930 --place "Space Needle" --city Seattle \
-    --location-presentation off # off, small (default), or large
+    --location-presentation large # small (default) or large
 
 # web link (renders as a rich link card)
 journal-cli write --live --body "Read this" --link https://example.com --link-title "A Post"
@@ -123,6 +123,16 @@ journal-cli edit 103 --live --clear-location --no-bookmark
 journal-cli edit 103 --live --journal "Travel"                     # stage an imported entry
 ```
 
+### Repairing
+
+```sh
+journal-cli repair-locations --dry-run  # find maps written by 1.2.0's `off`
+journal-cli repair-locations --live     # restore them as small map cards
+```
+
+Only needed if you used `--location-presentation off` on journal-cli 1.2.0.
+See "Why there is no location `off`" below.
+
 ### Deleting
 
 ```sh
@@ -142,7 +152,7 @@ S=skills/dayone-import/scripts/dayone-import.py
 
 python3 $S journals                    # list Day One journals
 python3 $S plan "Travel Journal"       # what imports, and what can't
-python3 $S import "Travel Journal" --into "Travel" --location-presentation off --target-db "$(journal-cli sandbox --dir /tmp/r)"
+python3 $S import "Travel Journal" --into "Travel" --location-presentation large --target-db "$(journal-cli sandbox --dir /tmp/r)"
 python3 $S import "Travel Journal" --into "Travel"
 ```
 
@@ -269,6 +279,37 @@ entry whose text was typed in the app. Consequences:
   entry would.
 - **Authoring the CRDT is out of scope** — fabricating causal history in a
   reverse-engineered protobuf risks corrupting merge for that entry.
+- **Some entry state lives only in the CRDT**, and so is not ours to write.
+  Location `off` is the known case — see below.
+
+### Why there is no location `off`
+
+Journal's map card has three modes (Off / Small / Large), but only two of them
+are in the asset row. The size is `ZISSLIM`; **Off is recorded solely in the
+entry's CRDT**, whose key table reads `title`, `gridAssetIDs`, `slimAssetID`,
+`hiddenAssetIDs`, `assetPlacement`. An Off map is listed under
+`hiddenAssetIDs` there, and its asset row stays byte-identical to a large
+one — `ZISSLIM=0, ZISHIDDEN=0`.
+
+Measured against a live store of 5,000+ assets: `ZISHIDDEN` is `0` on every
+asset of every type, Journal never sets it, and on all 39 entries whose CRDT
+carries `hiddenAssetIDs` the asset rows still read `ZISHIDDEN=0`. Five of
+those entries have a map as their only asset and carry `hiddenAssetIDs` with
+no `gridAssetIDs`/`slimAssetID`, which pins the meaning down exactly.
+
+So `ZISHIDDEN=1` does not hide a map card. Journal treats the asset as absent
+altogether: no card **and no Places entry**, the location effectively gone.
+journal-cli 1.2.0 shipped `--location-presentation off` written that way;
+1.3.0 refuses the flag rather than silently losing locations.
+
+If you imported with 1.2.0, the coordinates are still in the rows and
+`repair-locations` fixes them in place — no re-import:
+
+```sh
+journal-cli repair-locations --dry-run            # count what is affected
+journal-cli repair-locations --live               # restore as small maps
+journal-cli repair-locations --to large --live    # or as large ones
+```
 
 ### Not supported
 
