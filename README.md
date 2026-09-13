@@ -63,6 +63,9 @@ journal-cli list --limit 20 --full            # --full prints bodies
 journal-cli list --since 2025-01-01 --until 2025-12-31
 journal-cli show 95                           # entry + assets + attachment paths
 journal-cli search tokyo
+journal-cli write --body "Ran a 5K" --journal Fitness --add-journal Mindset --live
+journal-cli edit 42 --add-journal Leisure --live      # keeps existing memberships
+journal-cli edit 42 --remove-journal Leisure --live
 journal-cli export --dir ~/journal-export     # one .md per entry, YAML frontmatter
 journal-cli export --dir ~/export --format json
 journal-cli stats                             # counts, words, by-year histogram
