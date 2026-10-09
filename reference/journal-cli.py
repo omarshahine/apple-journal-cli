@@ -775,7 +775,7 @@ def cmd_write(a):
         if lp: bits.append("1 live photo")
         if a.link: bits.append("1 link")
         if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
-        if a.journal: bits.append(f"journal {a.journal!r}")
+        for j in (a.journal or []) + (a.add_journal or []): bits.append(f"journal {j!r}")
         print(f"DRY RUN: would create entry ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}. Nothing written.")
         return
     staged = False
@@ -844,8 +844,9 @@ def cmd_write(a):
             conn.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",
                          (json.dumps(ordering).encode(), pk))
 
-        if a.journal:
-            jpk, jname, jdefault = resolve_journal(conn, a.journal)
+        # membership is many-to-many: every --journal/--add-journal adds one
+        for sel in (a.journal or []) + (a.add_journal or []):
+            jpk, jname, jdefault = resolve_journal(conn, sel)
             if not jdefault:
                 conn.execute("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
                              (pk, jpk))
@@ -858,7 +859,7 @@ def cmd_write(a):
     if lp: bits.append("1 live photo")
     if a.link: bits.append("1 link")
     if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
-    if a.journal: bits.append(f"journal {a.journal!r}")
+    for j in (a.journal or []) + (a.add_journal or []): bits.append(f"journal {j!r}")
     print(f"Created entry {pk} ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}.")
     if staged:
         print("warning: this is a Mac-local staging membership. "
@@ -927,9 +928,14 @@ def cmd_edit(a):
     bookmark = True if a.bookmark else (False if a.no_bookmark else None)
     touches_text = body is not None or a.title is not None
     if not any([touches_text, media, has_loc, a.clear_location, a.add_link,
-                a.remove_media, a.remove_all_media, a.journal,
+                a.remove_media, a.remove_all_media, a.journal, a.add_journal, a.remove_journal,
                 a.date is not None, bookmark is not None]):
         die("nothing to change")
+    # --journal replaces every membership; --add-journal/--remove-journal change one
+    # at a time. Together the intent is ambiguous, so refuse rather than guess.
+    if a.journal and (a.add_journal or a.remove_journal):
+        die("--journal replaces every membership; use it alone, or use only "
+            "--add-journal/--remove-journal to change memberships one at a time")
 
     if a.dry_run:
         with Snapshot() as c:
@@ -950,7 +956,7 @@ def cmd_edit(a):
                 "  of the text). Editing ZTEXT alone can be reverted or duplicated on sync.\n"
                 "  Change location/media/date/bookmark freely, edit the text in Journal.app,\n"
                 "  or pass --force to write ZTEXT anyway.")
-        if a.journal and row["ZMERGEABLEATTRIBUTES"] is not None:
+        if (a.journal or a.add_journal or a.remove_journal) and row["ZMERGEABLEATTRIBUTES"] is not None:
             die(f"entry {a.id} already has Journal merge attributes. A direct journal move\n"
                 "  would be Mac-local and can be reverted by iCloud. Move it in Journal.app.")
 
@@ -1023,13 +1029,26 @@ def cmd_edit(a):
 
         if added: ordering_append(conn, a.id, added)
 
-        if a.journal:
-            jpk, jname, jdefault = resolve_journal(conn, a.journal)
+        # resolve every name before writing, so a typo can't half-apply a change
+        moves = [resolve_journal(conn, sel) for sel in a.journal or []]
+        adds = [resolve_journal(conn, sel) for sel in a.add_journal or []]
+        removes = [resolve_journal(conn, sel) for sel in a.remove_journal or []]
+        if any(jdefault for _, _, jdefault in adds):
+            die("the default journal holds every entry that is in no other journal; "
+                "there is no membership to add")
+        if moves:
             conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (a.id,))
-            if not jdefault:
-                conn.execute("insert into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
-                             (a.id, jpk))
-                staged = True
+            for jpk, _, jdefault in moves:
+                if not jdefault:
+                    conn.execute("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
+                                 (a.id, jpk))
+                    staged = True
+        for jpk, _, _ in adds:
+            conn.execute("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
+                         (a.id, jpk))
+            staged = True
+        for jpk, _, _ in removes:
+            conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=? and Z_6JOURNALS=?", (a.id, jpk))
 
     bits = []
     if body is not None: bits.append("body")
@@ -1041,7 +1060,9 @@ def cmd_edit(a):
     if media: bits.append(f"{len(media)} media added")
     if a.remove_media or a.remove_all_media: bits.append(f"{removed} media removed")
     if a.add_link: bits.append("1 link added")
-    if a.journal: bits.append(f"moved to journal {a.journal!r}")
+    if a.journal: bits.append("moved to journal " + ", ".join(repr(j) for j in a.journal))
+    for j in a.add_journal or []: bits.append(f"added to {j!r}")
+    for j in a.remove_journal or []: bits.append(f"removed from {j!r}")
     print(f"Updated entry {a.id} ({', '.join(bits)}).")
     if staged:
         print("warning: this is a Mac-local staging membership. "
@@ -1328,7 +1349,10 @@ def main():
                         "(default: small); off is not supported, see --help output")
     w.add_argument("--link", metavar="URL", help="attach a web link")
     w.add_argument("--link-title", help="title for --link (default: none)")
-    w.add_argument("--journal", help="journal name or id (default: the app's default journal)")
+    w.add_argument("--journal", action="append",
+                   help="journal name or id (default: the app's default journal); repeat for several")
+    w.add_argument("--add-journal", action="append", metavar="JOURNAL",
+                   help="same as --journal: add a membership (repeatable)")
     w.add_argument("--dry-run", dest="dry_run", action="store_true")
     w.add_argument("--accept-risk", dest="accept_risk", action="store_true")
     w.add_argument("--live", action="store_true", help="allow writing to the real store")
@@ -1354,7 +1378,13 @@ def main():
     ed.add_argument("--clear-location", action="store_true")
     ed.add_argument("--add-link", metavar="URL")
     ed.add_argument("--link-title")
-    ed.add_argument("--journal", help="move the entry to this journal (name or id)")
+    ed.add_argument("--journal", action="append",
+                    help="move the entry to this journal (name or id), replacing every "
+                         "membership; repeat to land in several")
+    ed.add_argument("--add-journal", action="append", metavar="JOURNAL",
+                    help="add a membership, leaving the others alone (repeatable)")
+    ed.add_argument("--remove-journal", action="append", metavar="JOURNAL",
+                    help="drop one membership (repeatable)")
     ed.add_argument("--force", action="store_true",
                     help="edit text even when the entry has a CRDT copy")
     ed.add_argument("--dry-run", dest="dry_run", action="store_true")

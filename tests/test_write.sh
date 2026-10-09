@@ -350,6 +350,49 @@ else
   echo "  SKIP  (seed has one journal)"
 fi
 
+echo "T12b multi-journal membership"
+# Membership is many-to-many (Z_5JOURNALS); the app lists an entry under every
+# journal it belongs to. Needs two custom journals; addressed by id so the
+# checks don't depend on what the seed calls them.
+J1=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where ZMERGEABLEATTRIBUTES is not null and coalesce(ZUSERDELETED,0)=0 order by Z_PK limit 1;")
+J2=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where ZMERGEABLEATTRIBUTES is not null and coalesce(ZUSERDELETED,0)=0 order by Z_PK limit 1 offset 1;")
+DEFPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where ZMERGEABLEATTRIBUTES is null and ZSORTCATEGORY<0 limit 1;")
+if [ -n "$J1" ] && [ -n "$J2" ]; then
+  mj(){ sqlite3 "$DB" "select group_concat(Z_6JOURNALS) from (select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$1 order by Z_6JOURNALS);"; }
+  MOUT=$("$CLI" --db "$DB" write --body "In two journals." --journal $J1 --add-journal $J2 2>&1)
+  MPK=$(echo "$MOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "write --journal + --add-journal joins both" "$(mj $MPK)" "$J1,$J2"
+  ok "write warns membership is local staging" "$(echo "$MOUT" | grep -c 'Mac-local staging membership')" "1"
+  M2PK=$("$CLI" --db "$DB" write --body "Repeated flag." --journal $J1 --journal $J2 2>&1 | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "write repeats --journal" "$(mj $M2PK)" "$J1,$J2"
+  "$CLI" --db "$DB" edit $M2PK --remove-journal $J2 >/dev/null 2>&1
+  ok "edit --remove-journal drops only that one" "$(mj $M2PK)" "$J1"
+  "$CLI" --db "$DB" edit $M2PK --add-journal $J2 >/dev/null 2>&1
+  ok "edit --add-journal keeps the others" "$(mj $M2PK)" "$J1,$J2"
+  "$CLI" --db "$DB" edit $M2PK --add-journal $J2 >/dev/null 2>&1
+  ok "edit --add-journal is idempotent" "$(mj $M2PK)" "$J1,$J2"
+  "$CLI" --db "$DB" edit $M2PK --journal $J1 >/dev/null 2>&1
+  ok "edit --journal still moves (replaces all)" "$(mj $M2PK)" "$J1"
+  "$CLI" --db "$DB" edit --journal $J2 --journal $J1 $M2PK >/dev/null 2>&1
+  ok "edit repeated --journal; id after the flags" "$(mj $M2PK)" "$J1,$J2"
+  "$CLI" --db "$DB" edit $M2PK --journal $J1 --add-journal $J2 >/dev/null 2>&1
+  ok "--journal mixed with --add-journal refused" "$?" "1"
+  ok "refused mix leaves memberships unchanged" "$(mj $M2PK)" "$J1,$J2"
+  if [ -n "$DEFPK" ]; then
+    "$CLI" --db "$DB" edit $M2PK --add-journal $DEFPK >/dev/null 2>&1
+    ok "--add-journal to the default journal refused" "$?" "1"
+  fi
+  "$CLI" --db "$DB" edit $M2PK --add-journal $J1 --add-journal "No Such Journal" >/dev/null 2>&1
+  ok "unknown --add-journal refused" "$?" "1"
+  ok "refused add leaves memberships unchanged" "$(mj $M2PK)" "$J1,$J2"
+  "$CLI" --db "$DB" edit $M2PK --remove-journal $J1 --remove-journal $J2 >/dev/null 2>&1
+  ok "removing every membership returns it to the default" "$(sqlite3 "$DB" "select count(*) from Z_5JOURNALS where Z_5ENTRIES=$M2PK;")" "0"
+  "$CLI" --db "$DB" delete $MPK --hard >/dev/null 2>&1
+  "$CLI" --db "$DB" delete $M2PK --hard >/dev/null 2>&1
+else
+  echo "  SKIP  (seed has fewer than two custom journals)"
+fi
+
 echo "T14 links"
 if command -v swift >/dev/null; then
   KOUT=$("$CLI" --db "$DB" write --body "With a link." --link "https://example.com/post" --link-title "Example Post" 2>&1)

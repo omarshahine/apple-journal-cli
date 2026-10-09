@@ -131,7 +131,7 @@ func cmdWrite(_ a: Args) {
         if lp != nil { bits.append("1 live photo") }
         if link != nil { bits.append("1 link") }
         if hasLoc { bits.append(String(format: "location %.5f,%.5f", lat!, lon!)) }
-        if let j = a.value("--journal") { bits.append("journal '\(j)'") }
+        for j in a.values("--journal") + a.values("--add-journal") { bits.append("journal '\(j)'") }
         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
         print("DRY RUN: would create entry (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)). Nothing written.")
         return
@@ -236,7 +236,7 @@ func cmdWrite(_ a: Args) {
     if lp != nil { bits.append("1 live photo") }
     if link != nil { bits.append("1 link") }
     if hasLoc { bits.append(String(format: "location %.5f,%.5f", lat!, lon!)) }
-    if let j = a.value("--journal") { bits.append("journal '\(j)'") }
+    for j in a.values("--journal") + a.values("--add-journal") { bits.append("journal '\(j)'") }
     let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
     print("Created entry \(created.pk) (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)).")
     if a.has("--live") {
@@ -266,9 +266,17 @@ func cmdEdit(_ a: Args) {
 
     if !(touchesText || !media.isEmpty || hasLoc || a.has("--clear-location")
          || !removeMedia.isEmpty || a.has("--remove-all-media") || addLink != nil
-         || a.value("--journal") != nil || a.has("--add-journal") || a.has("--remove-journal")
+         || a.has("--journal") || a.has("--add-journal") || a.has("--remove-journal")
          || a.value("--date") != nil || bookmark != nil) {
         die("nothing to change")
+    }
+    // --journal replaces every membership; --add-journal/--remove-journal change one
+    // at a time. Together the intent is ambiguous, so refuse rather than guess.
+    let moveTo = a.values("--journal")
+    let addTo = a.values("--add-journal"), removeFrom = a.values("--remove-journal")
+    if !moveTo.isEmpty && !(addTo.isEmpty && removeFrom.isEmpty) {
+        die("--journal replaces every membership; use it alone, or use only "
+            + "--add-journal/--remove-journal to change memberships one at a time")
     }
 
     if a.has("--dry-run") {
@@ -292,7 +300,7 @@ func cmdEdit(_ a: Args) {
                 + "  Change location/media/date/bookmark freely, edit the text in Journal.app,\n"
                 + "  or pass --force to write ZTEXT anyway.")
         }
-        if (a.value("--journal") != nil || a.has("--add-journal") || a.has("--remove-journal")),
+        if !(moveTo.isEmpty && addTo.isEmpty && removeFrom.isEmpty),
            row.b("ZMERGEABLEATTRIBUTES") != nil {
             die("entry \(pk) already has Journal merge attributes. A direct journal move\n"
                 + "  would be Mac-local and can be reverted by iCloud. Move it in Journal.app.")
@@ -387,29 +395,31 @@ func cmdEdit(_ a: Args) {
         }
         if !added.isEmpty { orderingAppend(db, pk, added) }
 
-        // --journal keeps its existing meaning: it *moves*, replacing every membership.
-        // --add-journal and --remove-journal change one membership without disturbing
-        // the others, which is what makes the sidebar usable as tags.
-        if let jsel = a.value("--journal"), !a.has("--add-journal"), !a.has("--remove-journal") {
-            let j = resolveJournal(db, jsel)
+        // --journal keeps its existing meaning: it *moves*, replacing every membership
+        // (repeat it to land in several). --add-journal and --remove-journal change one
+        // membership without disturbing the others, which makes the sidebar usable as tags.
+        // Resolve every name before writing, so a typo can't leave a half-applied change.
+        let moves = moveTo.map { resolveJournal(db, $0) }
+        let adds = addTo.map { resolveJournal(db, $0) }
+        let removes = removeFrom.map { resolveJournal(db, $0) }
+        if adds.contains(where: { $0.isDefault }) {
+            die("the default journal holds every entry that is in no other journal; "
+                + "there is no membership to add")
+        }
+        if !moves.isEmpty {
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
-            if !j.isDefault {
-                db.exec("insert into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)", [pk, j.pk])
+            for j in moves where !j.isDefault {
+                db.exec("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
+                        [pk, j.pk])
                 staged = true
             }
         }
-        for jsel in a.values("--add-journal") {
-            let j = resolveJournal(db, jsel)
-            if j.isDefault {
-                die("the default journal holds every entry that is in no other journal; "
-                    + "there is no membership to add")
-            }
+        for j in adds {
             db.exec("insert or ignore into Z_5JOURNALS (Z_5ENTRIES, Z_6JOURNALS) values (?,?)",
                     [pk, j.pk])
             staged = true
         }
-        for jsel in a.values("--remove-journal") {
-            let j = resolveJournal(db, jsel)
+        for j in removes {
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=? and Z_6JOURNALS=?", [pk, j.pk])
         }
     }
@@ -424,11 +434,11 @@ func cmdEdit(_ a: Args) {
     if !media.isEmpty { bits.append("\(media.count) media added") }
     if !removeMedia.isEmpty || a.has("--remove-all-media") { bits.append("\(removed) media removed") }
     if addLink != nil { bits.append("1 link added") }
-    if a.value("--journal") != nil && !a.has("--add-journal") && !a.has("--remove-journal") {
-        bits.append("moved to journal '\(a.value("--journal")!)'")
+    if !moveTo.isEmpty {
+        bits.append("moved to journal " + moveTo.map { "'\($0)'" }.joined(separator: ", "))
     }
-    for j in a.values("--add-journal") { bits.append("added to '\(j)'") }
-    for j in a.values("--remove-journal") { bits.append("removed from '\(j)'") }
+    for j in addTo { bits.append("added to '\(j)'") }
+    for j in removeFrom { bits.append("removed from '\(j)'") }
     print("Updated entry \(pk) (\(bits.joined(separator: ", "))).")
     if staged { warnStagingJournal() }
 }
