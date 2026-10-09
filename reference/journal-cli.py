@@ -35,14 +35,14 @@ def attach_dir():
     """Attachments live beside the database, so sandboxes stay self-contained."""
     return os.path.join(os.path.dirname(os.path.abspath(DB)), "Attachments")
 
-# Journal stores entry dates as FLOATING wall-clock time encoded as UTC: an
-# entry made at 11:51 local is stored so UTC-formatting yields 11:51. Encode
-# local wall clock on write; format with UTC on read.
+# Entry dates are stored as the true instant (seconds since the Core Data epoch),
+# the same encoding the Swift build writes and reads. A naive datetime is taken
+# as local wall clock on write, and read back with fromtimestamp() in local time.
 def cd_now():
     return cd(datetime.datetime.now())
 
 def cd(dt):
-    return dt.timestamp() - dt.astimezone().utcoffset().total_seconds() * -1 - EPOCH if False else         dt.timestamp() + (dt.astimezone().utcoffset().total_seconds()) - EPOCH
+    return dt.timestamp() - EPOCH
 
 def uid():
     return str(uuid.uuid4()).upper()

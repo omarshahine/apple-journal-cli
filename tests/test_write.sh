@@ -169,6 +169,14 @@ ok "bookmark on" "$(sqlite3 "$DB" "select ZFLAGGED from ZJOURNALENTRYMO where Z_
 ok "bookmark off" "$(sqlite3 "$DB" "select ZFLAGGED from ZJOURNALENTRYMO where Z_PK=$EPK;")" "0"
 "$CLI" --db "$DB" edit $EPK --date 2024-03-05 >/dev/null 2>&1
 ok "date updated" "$("$CLI" --db "$DB" show $EPK --json | jq_ 'd["date"][:10]')" "2024-03-05"
+# Wall clock must round-trip in the caller's timezone, and the stored value must
+# be the true instant (the Swift build's encoding), so both implementations read
+# each other's writes. CI repeats the suite under a non-UTC TZ; under UTC alone
+# an offset applied on write but not on read cancels out and hides.
+"$CLI" --db "$DB" edit $EPK --date "2024-03-05 23:30" >/dev/null 2>&1
+ok "date+time round-trips" "$("$CLI" --db "$DB" show $EPK --json | jq_ 'd["date"]')" "2024-03-05 23:30:00"
+ok "date stored as the true instant" "$(sqlite3 "$DB" "select cast(ZENTRYDATE as integer) from ZJOURNALENTRYMO where Z_PK=$EPK;")" \
+  "$(python3 -c 'import datetime;print(int(datetime.datetime(2024,3,5,23,30).timestamp())-978307200)')"
 "$CLI" --db "$DB" edit $EPK --lat 51.5007 --lon -0.1246 --place "Big Ben" --city London >/dev/null 2>&1
 ok "location added" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
 ok "location reads back" "$("$CLI" --db "$DB" show $EPK --json | jq_ '[p for a in d["assets"] for p in a.get("places",[])][0]["name"]')" "Big Ben"

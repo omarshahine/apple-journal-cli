@@ -10,8 +10,16 @@ permissions:
 
 jobs:
   test:
-    name: Build + test (Swift)
+    name: Build + test (Swift) ${{ matrix.tz }}
     runs-on: macos-15
+    # Runners default to UTC, where a date offset applied on write but not on
+    # read cancels out. Run every leg under a non-UTC zone too.
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: [UTC, America/Los_Angeles]
+    env:
+      TZ: ${{ matrix.tz }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -33,8 +41,16 @@ jobs:
         run: tests/test_write.sh
 
   test-reference:
-    name: Test (Python reference)
+    name: Test (Python reference) ${{ matrix.tz }}
     runs-on: macos-15
+    # Runners default to UTC, where a date offset applied on write but not on
+    # read cancels out. Run every leg under a non-UTC zone too.
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: [UTC, America/Los_Angeles]
+    env:
+      TZ: ${{ matrix.tz }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
