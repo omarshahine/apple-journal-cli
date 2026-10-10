@@ -127,6 +127,73 @@ func assetsFor(_ db: DB, _ pk: Int64) -> [[String: Any]] {
 
 struct JournalRow { var pk: Int64; var name: String; var isDefault: Bool }
 
+// A journal's name lives in its ZMERGEABLEATTRIBUTES CRDT blob: an 8-byte
+// "crdt" + version header, then protobuf. The attribute strings sit in the
+// field 6 submessage as repeated length-delimited values (field 2), laid out
+// as alternating value/key pairs -- "TV", "title", "Sand", "color", and so on.
+//
+// Reading the lengths matters. Scanning for runs of printable bytes instead
+// drops any name shorter than the run threshold and then reports whichever
+// binary noise happens to sit next to "title" -- and since the replica ids in
+// the same blob change as iCloud touches the record, that name is not even
+// stable between two runs of the same command.
+
+/// Read one base-128 varint, advancing `i`. nil if it runs off the end.
+private func crdtVarint(_ b: [UInt8], _ i: inout Int) -> UInt64? {
+    var value: UInt64 = 0, shift: UInt64 = 0
+    while i < b.count {
+        let byte = b[i]
+        i += 1
+        value |= UInt64(byte & 0x7f) << shift
+        if byte & 0x80 == 0 { return value }
+        shift += 7
+        if shift > 63 { return nil }
+    }
+    return nil
+}
+
+/// Payloads of every length-delimited `field` at this nesting level, in order.
+private func crdtFields(_ b: [UInt8], _ field: Int) -> [[UInt8]] {
+    var out: [[UInt8]] = []
+    var i = 0
+    while i < b.count {
+        guard let key = crdtVarint(b, &i) else { return out }
+        let number = Int(key >> 3)
+        switch key & 7 {
+        case 0: if crdtVarint(b, &i) == nil { return out }   // varint
+        case 1: i += 8                                       // 64-bit
+        case 5: i += 4                                       // 32-bit
+        case 2:                                              // length-delimited
+            guard let n = crdtVarint(b, &i), n <= UInt64(b.count - i) else { return out }
+            let end = i + Int(n)
+            if number == field { out.append(Array(b[i ..< end])) }
+            i = end
+        default: return out                                  // group/unknown wire type
+        }
+        if i > b.count { return out }
+    }
+    return out
+}
+
+func journalName(fromCRDT blob: Data) -> String? {
+    let bytes = [UInt8](blob)
+    guard bytes.count > 8 else { return nil }
+    var strings: [String] = []
+    for submessage in crdtFields(Array(bytes[8...]), 6) {
+        for s in crdtFields(submessage, 2) {
+            strings.append(String(decoding: s, as: UTF8.self))
+        }
+    }
+    // Walk the value/key pairs rather than searching for "title", so a
+    // journal actually named "title" reports its own name and not the key.
+    var i = 0
+    while i + 1 < strings.count {
+        if strings[i + 1] == "title" { return strings[i] }
+        i += 2
+    }
+    return nil
+}
+
 func journalRows(_ db: DB) -> [JournalRow] {
     var out: [JournalRow] = []
     for r in db.query("""
@@ -136,18 +203,7 @@ func journalRows(_ db: DB) -> [JournalRow] {
         var name = "Journal" // the built-in default has no CRDT blob
         var isDefault = false
         if let blob = r.b("ZMERGEABLEATTRIBUTES") {
-            // pull printable runs; the string right before "title" is the name
-            var cand: [String] = []
-            var cur: [UInt8] = []
-            for byte in blob {
-                if byte >= 0x20 && byte < 0x7f { cur.append(byte) }
-                else {
-                    if cur.count >= 3, let s = String(bytes: cur, encoding: .utf8) { cand.append(s) }
-                    cur = []
-                }
-            }
-            if cur.count >= 3, let s = String(bytes: cur, encoding: .utf8) { cand.append(s) }
-            if let i = cand.firstIndex(of: "title"), i > 0 { name = cand[i - 1] }
+            if let n = journalName(fromCRDT: blob) { name = n }
         } else if let sc = r.d("ZSORTCATEGORY"), sc < 0 {
             isDefault = true
         }

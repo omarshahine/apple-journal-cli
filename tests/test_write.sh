@@ -303,6 +303,18 @@ if [ "$NJ" -ge 2 ]; then
   # fixture calls it "Test Journal"; a real store calls it whatever you named it.
   TJ=$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$TJPK'][0]["name"]')
   ok "name resolved from CRDT" "$([ -n "$TJ" ] && [ "$TJ" != "None" ] && echo resolved || echo "empty")" "resolved"
+  # A two-character name is the case the old printable-run scan lost: too
+  # short to survive its minimum run length, so the name came back as
+  # whichever replica-id bytes happened to be printable -- and those change
+  # as iCloud touches the record, so it was not even stable between runs.
+  # Find it by its encoded value/key pair ("TV", "title") so the check stays
+  # seed-independent; a store without such a journal skips it.
+  SJPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALMO where instr(ZMERGEABLEATTRIBUTES, X'1202545612057469746C65')>0 limit 1;")
+  if [ -n "$SJPK" ]; then
+    ok "short name resolved from CRDT" "$("$CLI" --db "$DB" journals --json | jq_ '[j for j in d if j["pk"]=='$SJPK'][0]["name"]')" "TV"
+    "$CLI" --db "$DB" write --body "In the short-named journal." --journal "TV" >/dev/null 2>&1
+    ok "short name addressable by write" "$?" "0"
+  fi
   JOUT=$("$CLI" --db "$DB" write --body "In the test journal." --journal "$TJ" 2>&1)
   JPK=$(echo "$JOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
   ok "join row written" "$(sqlite3 "$DB" "select Z_6JOURNALS from Z_5JOURNALS where Z_5ENTRIES=$JPK;")" "$TJPK"

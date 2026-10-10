@@ -551,6 +551,77 @@ def cmd_stats(a):
 
 # ---------------------------------------------------------------- journals
 
+def _crdt_varint(b, i):
+    """Read one base-128 varint at i. Returns (value, next_index)."""
+    value = shift = 0
+    while i < len(b):
+        byte = b[i]
+        i += 1
+        value |= (byte & 0x7f) << shift
+        if not byte & 0x80:
+            return value, i
+        shift += 7
+        if shift > 63:
+            break
+    raise ValueError("truncated varint")
+
+
+def _crdt_fields(b, field):
+    """Payloads of every length-delimited `field` at this nesting level."""
+    out, i = [], 0
+    while i < len(b):
+        try:
+            key, i = _crdt_varint(b, i)
+        except ValueError:
+            return out
+        number, wire = key >> 3, key & 7
+        try:
+            if wire == 0:
+                _, i = _crdt_varint(b, i)
+            elif wire == 1:
+                i += 8
+            elif wire == 5:
+                i += 4
+            elif wire == 2:
+                n, i = _crdt_varint(b, i)
+                if i + n > len(b):
+                    return out
+                if number == field:
+                    out.append(b[i:i + n])
+                i += n
+            else:
+                return out
+        except ValueError:
+            return out
+    return out
+
+
+def journal_name_from_crdt(blob):
+    """The journal's name, or None.
+
+    The blob is an 8-byte "crdt" + version header followed by protobuf. The
+    attributes live in the field 6 submessage as repeated length-delimited
+    strings (field 2), alternating value then key: "TV", "title", "Sand",
+    "color", and so on.
+
+    Reading the declared lengths keeps short names intact. Scanning for runs
+    of printable bytes instead loses any name below the run threshold and
+    reports the neighbouring replica-id bytes, which change as iCloud touches
+    the record.
+    """
+    if not blob or len(blob) <= 8:
+        return None
+    strings = []
+    for submessage in _crdt_fields(blob[8:], 6):
+        for s in _crdt_fields(submessage, 2):
+            strings.append(s.decode("utf-8", "replace"))
+    # walk the value/key pairs, so a journal named "title" reports its own name
+    for i in range(0, len(strings) - 1, 2):
+        if strings[i + 1] == "title":
+            return strings[i]
+    return None
+
+
 def journal_rows(conn):
     out = []
     for r in conn.execute("""select Z_PK, ZMERGEABLEATTRIBUTES, ZSORTCATEGORY
@@ -559,12 +630,7 @@ def journal_rows(conn):
         blob = r["ZMERGEABLEATTRIBUTES"]
         name = "Journal"          # the built-in default has no CRDT blob
         if blob:
-            import re as _re
-            cand = _re.findall(rb'[\x20-\x7e\xc2-\xf4][\x20-\x7e\x80-\xbf]{2,}', blob)
-            cand = [c.decode("utf-8", "replace") for c in cand]
-            if "title" in cand:
-                i = cand.index("title")
-                if i > 0: name = cand[i - 1]
+            name = journal_name_from_crdt(blob) or name
         out.append({"pk": r["Z_PK"], "name": name,
                     "default": blob is None and r["ZSORTCATEGORY"] is not None
                                and r["ZSORTCATEGORY"] < 0})
