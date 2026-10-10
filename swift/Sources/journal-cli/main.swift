@@ -25,14 +25,15 @@ WRITE (guarded: --live required against the real store; auto-backup first)
             [--media PATH...] [--live-photo IMAGE VIDEO] [--no-resize]
             [--photos-link] [--link URL] [--link-title T]
             [--lat N --lon N] [--place P] [--city C] [--location-presentation small|large]
-            [--journal NAME] [--live]
+            [--journal NAME]... [--live]
   edit      <id> [--title T] [--body B] [--body-file F] [--body-rtf F] [--date D]
             [--bookmark | --no-bookmark] [--add-media PATH...] [--no-resize]
             [--photos-link] [--add-link URL] [--link-title T]
             [--lat N --lon N] [--place P] [--city C] [--location-presentation small|large]
             [--clear-location]
             [--remove-media ID...] [--remove-all-media]
-            [--journal NAME] [--force] [--live]
+            [--journal NAME]... | [--add-journal NAME]... [--remove-journal NAME]...
+            [--force] [--live]
   delete    <id> [--hard] [--force] [--live]
   restore   <id> [--live]
   empty     [--force] [--live]
@@ -75,7 +76,11 @@ let boolFlags: Set<String> = ["--json", "--full", "--include-empty", "--bookmark
                               "--photos-link", "--no-resize"]
 let valueFlags: Set<String> = ["--limit", "--since", "--until", "--dir", "--format",
                                "--title", "--body", "--body-file", "--body-rtf", "--date",
-                               "--lat", "--lon", "--place", "--city", "--location-presentation", "--journal",
+                               "--lat", "--lon", "--place", "--city", "--location-presentation",
+                               // Journal membership is many-to-many, so these repeat. They
+                               // stay value flags (one name per flag) rather than list flags,
+                               // which would swallow a following positional entry id.
+                               "--journal", "--add-journal", "--remove-journal",
                                "--link", "--link-title", "--add-link", "--from", "--to"]
 let listFlags: Set<String> = ["--media", "--add-media", "--live-photo", "--remove-media"]
 
