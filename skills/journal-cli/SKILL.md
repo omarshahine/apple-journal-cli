@@ -47,8 +47,9 @@ journal-cli write --live --media a.heic b.mov          # photos auto-resize
 journal-cli write --live --live-photo IMG.heic IMG.mov # image+video pair
 journal-cli write --live --lat N --lon N --place P --city C
 journal-cli write --live --link URL --link-title T
-journal-cli write --live --journal "Name" ...          # Mac-local staging journal
+journal-cli write --live --journal "Name" ...          # Mac-local staging journal (repeat for several)
 journal-cli edit <id> --live [same flags; --add-media/--add-link/--remove-media ID/--clear-location/--journal N]
+journal-cli edit <id> --live --add-journal "Name"      # keep other memberships; --remove-journal drops one
 journal-cli sync-journals --journal "Name"             # audit and show native finalization steps
 journal-cli delete <id> --live                         # soft; syncs properly
 journal-cli restore <id> --live

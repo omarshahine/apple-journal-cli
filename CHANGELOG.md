@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.4.0
+
+### Added — an entry can belong to more than one journal
+
+Journal's membership table is many-to-many, and the app lists an entry under
+every journal it belongs to. The CLI can now express that
+([#11](https://github.com/omarshahine/apple-journal-cli/pull/11), thanks
+[@rodchristiansen](https://github.com/rodchristiansen)):
+
+- `write` accepts repeated `--journal` (and `--add-journal`).
+- `edit --add-journal NAME` adds a membership and leaves the others alone;
+  `edit --remove-journal NAME` drops one. Both repeat.
+- `edit --journal` still *moves* the entry, replacing every membership;
+  repeat it to land in several. Mixing it with `--add-journal` or
+  `--remove-journal` is refused rather than guessed at.
+- `edit --add-journal` to the default journal is refused: the default holds
+  every entry that is in no other journal, so there is no membership to add.
+  (`write` naming the default journal just creates the entry there.)
+
+The journal flags take one name each. `edit --journal Travel 42` reads `42` as
+the entry id, not as a second journal.
+
+### Fixed — short journal names
+
+Journal names are now read from the length prefixes of the journal's CRDT blob
+instead of a scan for printable runs
+([#8](https://github.com/omarshahine/apple-journal-cli/pull/8), thanks
+[@adeolonoh](https://github.com/adeolonoh)). A name shorter than three
+characters, such as "TV", used to come back as whatever replica-id bytes sat
+next to it (and changed between runs), so `--journal TV` could not address it.
+Non-ASCII names, which the Swift scan dropped, now decode too.
+
+### Fixed — Python reference dates off by the UTC offset
+
+`reference/journal-cli.py` now stores entry dates as the true instant, as the
+Swift build does; it had shifted every date it wrote by the local UTC offset
+([#12](https://github.com/omarshahine/apple-journal-cli/pull/12)). CI now runs
+both implementations under UTC and America/Los_Angeles, so a timezone bug can
+no longer hide behind UTC runners. The shipped binary was not affected.
+
 ## 1.3.0
 
 ### Fixed — `--location-presentation off` was erasing locations
