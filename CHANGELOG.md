@@ -15,8 +15,9 @@ every journal it belongs to. The CLI can now express that
 - `edit --journal` still *moves* the entry, replacing every membership;
   repeat it to land in several. Mixing it with `--add-journal` or
   `--remove-journal` is refused rather than guessed at.
-- `--add-journal` to the default journal is refused: the default holds every
-  entry that is in no other journal, so there is no membership to add.
+- `edit --add-journal` to the default journal is refused: the default holds
+  every entry that is in no other journal, so there is no membership to add.
+  (`write` naming the default journal just creates the entry there.)
 
 The journal flags take one name each. `edit --journal Travel 42` reads `42` as
 the entry id, not as a second journal.
