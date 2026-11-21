@@ -56,19 +56,6 @@ WRITE (guarded: --live required against the real store; auto-backup first)
 
 var argv = Array(CommandLine.arguments.dropFirst())
 
-// global --db (also honored via $JOURNAL_DB)
-if let i = argv.firstIndex(of: "--db") {
-    guard i + 1 < argv.count else { die("--db needs a value") }
-    DB_PATH = (argv[i + 1] as NSString).expandingTildeInPath
-    argv.removeSubrange(i...(i + 1))
-}
-
-guard let cmd = argv.first, cmd != "--help", cmd != "-h", cmd != "help" else {
-    print(HELP)
-    exit(argv.first == nil ? 1 : 0)
-}
-let rest = Array(argv.dropFirst())
-
 let boolFlags: Set<String> = ["--json", "--full", "--include-empty", "--bookmark",
                               "--dry-run", "--accept-risk", "--markdown", "--plain", "--inline",
                               "--no-bookmark", "--live", "--hard", "--force",
@@ -83,6 +70,30 @@ let valueFlags: Set<String> = ["--limit", "--since", "--until", "--dir", "--form
                                "--journal", "--add-journal", "--remove-journal",
                                "--link", "--link-title", "--add-link", "--from", "--to"]
 let listFlags: Set<String> = ["--media", "--add-media", "--live-photo", "--remove-media"]
+
+// global --db (also honored via $JOURNAL_DB). Accepted before or after the
+// command, but never as the value of another option: `render --body --db`
+// renders the literal text "--db". Only value flags take the next token; a list
+// flag's values already stop at the next "--" token, as Args does.
+var dbScan = 0
+while dbScan < argv.count {
+    let tok = argv[dbScan]
+    if tok == "--db" {
+        guard dbScan + 1 < argv.count else { die("--db needs a value") }
+        DB_PATH = (argv[dbScan + 1] as NSString).expandingTildeInPath
+        argv.removeSubrange(dbScan...(dbScan + 1))
+    } else if valueFlags.contains(tok) {
+        dbScan += 2
+    } else {
+        dbScan += 1
+    }
+}
+
+guard let cmd = argv.first, cmd != "--help", cmd != "-h", cmd != "help" else {
+    print(HELP)
+    exit(argv.first == nil ? 1 : 0)
+}
+let rest = Array(argv.dropFirst())
 
 let a = Args(rest, listFlags: listFlags, valueFlags: valueFlags, boolFlags: boolFlags)
 
