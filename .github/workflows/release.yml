@@ -216,7 +216,20 @@ jobs:
           fi
           PACKAGE_EXISTS=$(lookup apple-journal-cli)
           if [ "$PACKAGE_EXISTS" = yes ]; then
-            npm publish --provenance --access public
+            # Releases for different tags can run at once, and npm publish moves
+            # `latest` by default. Never let an older version take `latest` from
+            # a newer one: publish it under `maintenance` instead. Trusted
+            # publishing can only `npm publish` (no dist-tag edits afterwards),
+            # so this has to be decided up front; the window left is two runs
+            # reaching this line within the same few seconds.
+            TAG=latest
+            LATEST=$(npm view apple-journal-cli dist-tags.latest)
+            if [ -n "$LATEST" ] && [ "$LATEST" != "$VERSION" ] &&
+               [ "$(printf '%s\n%s\n' "$LATEST" "$VERSION" | sort -V | tail -1)" = "$LATEST" ]; then
+              echo "::warning::npm latest is $LATEST, newer than $VERSION; publishing $VERSION under the maintenance tag."
+              TAG=maintenance
+            fi
+            npm publish --provenance --access public --tag "$TAG"
           elif [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             echo "First publish of apple-journal-cli via NPM_TOKEN."
             npm publish --access public
@@ -224,4 +237,4 @@ jobs:
             echo "::warning::apple-journal-cli does not exist on npm yet and no NPM_TOKEN secret is set. Add a granular npm token as the NPM_TOKEN repo secret (or configure trusted publishing after a first publish) and re-run."
             exit 0
           fi
-          npm view apple-journal-cli version
+          npm view apple-journal-cli dist-tags
