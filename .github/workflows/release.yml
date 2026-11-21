@@ -9,11 +9,13 @@ permissions:
   contents: write
   id-token: write # npm OIDC trusted publishing
 
-# One release at a time across ALL tags: every run pushes to the same tap
-# branch, so per-tag groups let two releases race and the loser fail its push
-# before npm. The tap step also refuses to move the formula backwards.
+# Per tag, not global: GitHub keeps one pending run per group, so a shared
+# group would cancel a waiting release outright. Different tags can therefore
+# run together and race on the tap branch; the tap step handles that by
+# re-fetching and re-applying on a rejected push, and never moves the formula
+# to an older version.
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 # One sequential pipeline (spotmoji-style): validate -> test -> build ->
@@ -106,21 +108,10 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Update Homebrew formula
+      - name: Download source archive
         run: |
           set -euo pipefail
           TARBALL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
-          FILE=homebrew-tap/Formula/journal-cli.rb
-
-          # Never move the formula backwards: an older tag re-run (or one that
-          # finishes after a newer release) must not replace a newer formula.
-          CURRENT=$(sed -nE 's|.*/archive/refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz".*|\1|p' "$FILE" | head -1)
-          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION" ] &&
-             [ "$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)" = "$CURRENT" ]; then
-            echo "::warning::Tap formula is at $CURRENT, newer than $VERSION; leaving it alone."
-            exit 0
-          fi
-
           # Retry to absorb the brief delay before GitHub serves a fresh tag
           # tarball. Download to a temp path and promote it only on success, so
           # a partial transfer can never be hashed into the formula.
@@ -139,25 +130,52 @@ jobs:
             exit 1
           fi
           tar tzf source.tar.gz >/dev/null
-          SHA256=$(shasum -a 256 source.tar.gz | awk '{print $1}')
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
+          echo "SHA256=$(shasum -a 256 source.tar.gz | awk '{print $1}')" >> "$GITHUB_ENV"
 
-          perl -0pi -e "s{url \"https://github.com/${GITHUB_REPOSITORY//\//\\/}/archive/refs/tags/v[^\"]+\.tar\.gz\"}{url \"$TARBALL\"}" "$FILE"
-          perl -0pi -e "s{^(\s*)sha256 \"[0-9a-f]{64}\"}{\${1}sha256 \"$SHA256\"}m" "$FILE"
-          brew style "$FILE"
-          grep -nE 'url |sha256 ' "$FILE" | head -4
-
-      - name: Push Homebrew formula
+      - name: Update and push Homebrew formula
         run: |
           set -euo pipefail
-          git -C homebrew-tap config user.name  "github-actions[bot]"
-          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C homebrew-tap add Formula/journal-cli.rb
-          if git -C homebrew-tap diff --cached --quiet; then
-            echo "Formula already up to date."
-            exit 0
-          fi
-          git -C homebrew-tap commit -m "journal-cli: update to v${VERSION}"
-          git -C homebrew-tap push
+          TAP=homebrew-tap
+          FILE=Formula/journal-cli.rb
+          BRANCH=$(git -C "$TAP" rev-parse --abbrev-ref HEAD)
+          git -C "$TAP" config user.name  "github-actions[bot]"
+          git -C "$TAP" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Another tag's release can push to the tap between our checkout and
+          # our push. On a rejected push, start over from the tap's new tip:
+          # re-check the version there, re-apply, and push again.
+          for attempt in 1 2 3 4 5; do
+            # Never move the formula backwards: an older tag re-run (or one
+            # that finishes after a newer release) must not replace it.
+            CURRENT=$(sed -nE 's|.*/archive/refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz".*|\1|p' "$TAP/$FILE" | head -1)
+            if [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION" ] &&
+               [ "$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)" = "$CURRENT" ]; then
+              echo "::warning::Tap formula is at $CURRENT, newer than $VERSION; leaving it alone."
+              exit 0
+            fi
+
+            perl -0pi -e "s{url \"https://github.com/${GITHUB_REPOSITORY//\//\\/}/archive/refs/tags/v[^\"]+\.tar\.gz\"}{url \"$TARBALL\"}" "$TAP/$FILE"
+            perl -0pi -e "s{^(\s*)sha256 \"[0-9a-f]{64}\"}{\${1}sha256 \"$SHA256\"}m" "$TAP/$FILE"
+            brew style "$TAP/$FILE"
+            grep -nE 'url |sha256 ' "$TAP/$FILE" | head -4
+
+            git -C "$TAP" add "$FILE"
+            if git -C "$TAP" diff --cached --quiet; then
+              echo "Formula already up to date."
+              exit 0
+            fi
+            git -C "$TAP" commit -q -m "journal-cli: update to v${VERSION}"
+            if git -C "$TAP" push origin "HEAD:$BRANCH"; then
+              exit 0
+            fi
+            echo "Tap push rejected (attempt $attempt); re-fetching and re-applying..."
+            git -C "$TAP" fetch -q origin "$BRANCH"
+            git -C "$TAP" reset -q --hard FETCH_HEAD
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not push the formula after 5 attempts."
+          exit 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

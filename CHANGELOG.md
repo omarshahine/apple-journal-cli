@@ -16,9 +16,10 @@ the command.
 - The Homebrew step only hashes a source archive that actually downloaded. A
   run whose five download attempts all failed could hash a partial file and
   commit a bad checksum to the tap; it now fails before touching the formula.
-- Releases run one at a time across all tags, and the tap step refuses to move
-  the formula to an older version. Two tags released close together used to
-  race on the tap push, and the loser stopped before npm.
+- Two tags released close together used to race on the tap push, and the
+  loser stopped before npm. A rejected tap push now re-fetches the tap,
+  re-applies the update and retries, and the step never moves the formula to
+  an older version.
 - Re-running a release whose npm publish already succeeded now skips npm
   instead of failing on the immutable version. Registry errors other than a
   404 fail the step rather than being read as "not published".
