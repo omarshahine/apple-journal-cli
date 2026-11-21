@@ -521,6 +521,14 @@ if [ $? -eq 0 ]; then
   ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
   ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
   ok "image syntax untouched"         "$(printf '![alt](https://e.com/i.png)' | "$CLI" render --plain)" '![alt](https://e.com/i.png)'
+
+  # The global --db pass must not take an option's value for itself. It used
+  # to treat `--body --db` as a database selector and eat the next argument.
+  ok "--db as a --body value is text" "$("$CLI" render --body '--db' --plain 2>&1)" "--db"
+  DBV=$("$CLI" --db "$DB" write --title '--db' --body "$SB/not-a-store" 2>&1)
+  DBVPK=$(echo "$DBV" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "--db as a --title value is kept" "$("$CLI" --db "$DB" show $DBVPK --json | jq_ 'd["title"]')" "--db"
+  ok "--db after the command still selects" "$("$CLI" show $DBVPK --db "$DB" --json | jq_ 'd["text"]')" "$SB/not-a-store"
   ok "real link still flattened"      "$(printf '[real](https://x.com)' | "$CLI" render --plain)" 'real (https://x.com)'
   TOOUT=$("$CLI" --db "$DB" write --markdown --title 'Summary check' 2>&1)
   ok "title-only summary not empty"   "$(printf '%s' "$TOOUT" | grep -c 'empty')" "0"

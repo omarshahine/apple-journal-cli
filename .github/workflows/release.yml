@@ -9,13 +9,17 @@ permissions:
   contents: write
   id-token: write # npm OIDC trusted publishing
 
+# One release at a time across ALL tags: every run pushes to the same tap
+# branch, so per-tag groups let two releases race and the loser fail its push
+# before npm. The tap step also refuses to move the formula backwards.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 # One sequential pipeline (spotmoji-style): validate -> test -> build ->
 # GitHub Release -> Homebrew tap -> npm. Re-runs are idempotent: release
-# uploads use --clobber and the tap bump no-ops when already current.
+# uploads use --clobber, the tap bump no-ops when already current, and npm
+# skips a version that is already published.
 #
 # Secrets: HOMEBREW_TAP_TOKEN (fine-grained PAT for omarshahine/homebrew-tap,
 # Contents: read & write). npm publishes via OIDC trusted publishing once the
@@ -106,15 +110,37 @@ jobs:
         run: |
           set -euo pipefail
           TARBALL="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
-          # Retry to absorb the brief delay before GitHub serves a fresh tag tarball.
+          FILE=homebrew-tap/Formula/journal-cli.rb
+
+          # Never move the formula backwards: an older tag re-run (or one that
+          # finishes after a newer release) must not replace a newer formula.
+          CURRENT=$(sed -nE 's|.*/archive/refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz".*|\1|p' "$FILE" | head -1)
+          if [ -n "$CURRENT" ] && [ "$CURRENT" != "$VERSION" ] &&
+             [ "$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)" = "$CURRENT" ]; then
+            echo "::warning::Tap formula is at $CURRENT, newer than $VERSION; leaving it alone."
+            exit 0
+          fi
+
+          # Retry to absorb the brief delay before GitHub serves a fresh tag
+          # tarball. Download to a temp path and promote it only on success, so
+          # a partial transfer can never be hashed into the formula.
+          rm -f source.tar.gz source.tar.gz.part
           for attempt in 1 2 3 4 5; do
-            if curl -fsSL "$TARBALL" -o source.tar.gz; then break; fi
+            if curl -fsSL "$TARBALL" -o source.tar.gz.part; then
+              mv source.tar.gz.part source.tar.gz
+              break
+            fi
+            rm -f source.tar.gz.part
             echo "Attempt $attempt failed; retrying in 10s..."
             sleep 10
           done
+          if [ ! -s source.tar.gz ]; then
+            echo "::error::Could not download $TARBALL after 5 attempts; not touching the formula."
+            exit 1
+          fi
+          tar tzf source.tar.gz >/dev/null
           SHA256=$(shasum -a 256 source.tar.gz | awk '{print $1}')
 
-          FILE=homebrew-tap/Formula/journal-cli.rb
           perl -0pi -e "s{url \"https://github.com/${GITHUB_REPOSITORY//\//\\/}/archive/refs/tags/v[^\"]+\.tar\.gz\"}{url \"$TARBALL\"}" "$FILE"
           perl -0pi -e "s{^(\s*)sha256 \"[0-9a-f]{64}\"}{\${1}sha256 \"$SHA256\"}m" "$FILE"
           brew style "$FILE"
@@ -150,7 +176,28 @@ jobs:
           # package exists and this repo is configured as its trusted publisher
           # on npmjs.com, the token secret can be deleted.
           cd npm
-          if npm view apple-journal-cli version >/dev/null 2>&1; then
+          # npm versions are immutable, so a re-run after a successful publish
+          # must skip rather than fail. Only a 404 means "not there"; any other
+          # registry error fails the step instead of being read as absence.
+          lookup() { # prints "yes" or "no"; exits on a registry error
+            local out
+            if out=$(npm view "$1" version 2>npm-view.err); then
+              [ -n "$out" ] && echo yes || echo no
+            elif grep -q E404 npm-view.err; then
+              echo no
+            else
+              cat npm-view.err >&2
+              echo "::error::npm registry lookup for $1 failed" >&2
+              return 1
+            fi
+          }
+          VERSION_PUBLISHED=$(lookup "apple-journal-cli@$VERSION")
+          if [ "$VERSION_PUBLISHED" = yes ]; then
+            echo "apple-journal-cli@$VERSION is already on npm; nothing to publish."
+            exit 0
+          fi
+          PACKAGE_EXISTS=$(lookup apple-journal-cli)
+          if [ "$PACKAGE_EXISTS" = yes ]; then
             npm publish --provenance --access public
           elif [ -n "${NODE_AUTH_TOKEN:-}" ]; then
             echo "First publish of apple-journal-cli via NPM_TOKEN."

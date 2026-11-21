@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.1
+
+### Fixed: `--db` no longer steals another option's value
+
+The global `--db` pass searched every argument for the literal `--db`, so a
+body, title or query that was exactly `--db` became a database selector and
+the next argument vanished as its path. `render --body '--db' --plain` read
+`--plain` as the store and then failed with "--body needs a value". `--db` is
+now recognized only where an option can start; it still works before or after
+the command.
+
+### Fixed: release pipeline hardening
+
+- The Homebrew step only hashes a source archive that actually downloaded. A
+  run whose five download attempts all failed could hash a partial file and
+  commit a bad checksum to the tap; it now fails before touching the formula.
+- Releases run one at a time across all tags, and the tap step refuses to move
+  the formula to an older version. Two tags released close together used to
+  race on the tap push, and the loser stopped before npm.
+- Re-running a release whose npm publish already succeeded now skips npm
+  instead of failing on the immutable version. Registry errors other than a
+  404 fail the step rather than being read as "not published".
+
 ## 1.4.0
 
 ### Added — an entry can belong to more than one journal
