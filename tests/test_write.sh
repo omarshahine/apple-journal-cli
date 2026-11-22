@@ -21,6 +21,7 @@ if [ -z "$DB" ] || [ ! -f "$DB" ]; then
 fi
 ATT="$SB/Attachments"
 pass=0; fail=0
+store_state(){ sqlite3 "$DB" "select (select count(*) from ZJOURNALENTRYMO), (select group_concat(Z_PK||':'||coalesce(hex(ZASSETORDERING),'')||':'||coalesce(ZUPDATEDDATE,''),',') from ZJOURNALENTRYMO), (select group_concat(Z_PK||':'||ZENTRY||':'||coalesce(ZISHIDDEN,'')||':'||coalesce(ZISSLIM,'')||':'||coalesce(hex(ZASSETMETADATA),''),',') from ZJOURNALENTRYASSETMO), (select count(*) from Z_5JOURNALS);" | shasum | cut -c1-16; }
 ok(){ if [ "$2" = "$3" ]; then echo "  PASS  $1"; pass=$((pass+1));
       else echo "  FAIL  $1 (want '$3', got '$2')"; fail=$((fail+1)); fi; }
 jq_(){ python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
@@ -96,11 +97,13 @@ echo "T3a location presentation"
 # Journal keeps a map's Off state in the entry CRDT (hiddenAssetIDs), never in
 # the asset row, and reads ZISHIDDEN=1 as "no such asset" -- which loses the
 # location from Places too. So `off` must be refused, not approximated.
+OFF0=$(store_state)
 POUT=$("$CLI" --db "$DB" write --body "Private location." --lat 47.6 --lon -122.3 \
        --location-presentation off 2>&1); PRC=$?
 ok "off is rejected" "$PRC" "1"
 ok "off explains itself" "$(printf '%s' "$POUT" | grep -c 'not supported')" "1"
 ok "off wrote nothing" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZISHIDDEN=1;")" "0"
+ok "off left the store unchanged" "$(store_state)" "$OFF0"
 LOUT2=$("$CLI" --db "$DB" write --body "Big map." --lat 47.6 --lon -122.3 --location-presentation large 2>&1)
 LPK2=$(echo "$LOUT2" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 ok "large location is visible" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$LPK2;")" "0"
@@ -190,8 +193,11 @@ ok "location added" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO 
 ok "location reads back" "$("$CLI" --db "$DB" show $EPK --json | jq_ '[p for a in d["assets"] for p in a.get("places",[])][0]["name"]')" "Big Ben"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --place "Eiffel Tower" >/dev/null 2>&1
 ok "location replaced not duplicated" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
+EOFF0=$(store_state)
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation off >/dev/null 2>&1
+ok "edit off is rejected" "$?" "1"
 ok "edit refuses to hide location" "$(sqlite3 "$DB" "select ZISHIDDEN from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "0"
+ok "edit off left the store unchanged" "$(store_state)" "$EOFF0"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation small >/dev/null 2>&1
 ok "edit can shrink location" "$(sqlite3 "$DB" "select ZISSLIM from ZJOURNALENTRYASSETMO where ZENTRY=$EPK and ZASSETTYPE='multiPinMap';")" "1"
 "$CLI" --db "$DB" edit $EPK --lat 48.8584 --lon 2.2945 --location-presentation large >/dev/null 2>&1
@@ -541,6 +547,11 @@ if [ $? -eq 0 ]; then
   ok "link destination kept literal"  "$("$CLI" render --body '[link](https://example.com/*item*)' --plain)" "link (https://example.com/*item*)"
   ok "fenced blank lines kept"          "$(printf '```\na\n\n\nb\n  \nc\n```' | "$CLI" render --plain | python3 -c 'import sys;print(repr(sys.stdin.read()))')" "'a\\n\\n\\nb\\n  \\nc'"
   ok "trailing fenced blank lines kept" "$(printf '```\na\n\n\n```' | "$CLI" render | python3 -c 'import sys;r=sys.stdin.read();print(r[r.rindex(" a")+2:].count(chr(92)+chr(10)))')" "2"
+  BOUT=$("$CLI" --db "$DB" write --body "boundary" --media "$IMG" 2>&1)
+  BPK2=$(echo "$BOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  BAID=$("$CLI" --db "$DB" show $BPK2 --json | jq_ '[a for a in d["assets"] if a["type"]=="photo"][0]["id"]')
+  "$CLI" edit --remove-media $BAID --db "$DB" $BPK2 >/dev/null 2>&1
+  ok "--db ends a list option's values" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$BPK2;")" "0"
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
   # Fixed-format dates ignore the user's calendar (-AppleLocale is a
   # Foundation argument-domain default, honored per process).
@@ -752,6 +763,66 @@ ok "animated GIF stored unchanged" "$(cmp -s "$GIF" "$GSTORED" && echo same || e
 # Embedded NUL in a text column survives a read.
 sqlite3 "$DB" "update ZJOURNALENTRYASSETFILEATTACHMENTMO set ZFILEPATH = ZFILEPATH || char(0) || 'tail' where ZASSET in (select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=$GPK);"
 ok "embedded NUL survives a read" "$("$CLI" --db "$DB" show $GPK --json | jq_ '[f["path"] for a in d["assets"] for f in a["files"]][0].endswith(chr(0)+"tail")')" "True"
+
+echo "T21 refusals, exports and backups"
+# --dry-run runs the same refusals as the real edit.
+DRY=$("$CLI" --db "$DB" write --body "dry target" 2>&1)
+DPK2=$(echo "$DRY" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+"$CLI" --db "$DB" edit $DPK2 --date not-a-date --dry-run >/dev/null 2>&1
+ok "dry-run rejects a bad --date" "$?" "1"
+"$CLI" --db "$DB" edit $DPK2 --add-journal "No Such Journal $$" --dry-run >/dev/null 2>&1
+ok "dry-run rejects an unknown journal" "$?" "1"
+"$CLI" --db "$DB" edit $DPK2 --remove-media 999999 --dry-run >/dev/null 2>&1
+ok "dry-run rejects an unknown asset" "$?" "1"
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=x'6372647407000000' where Z_PK=$DPK2;"
+"$CLI" --db "$DB" edit $DPK2 --body "x" --dry-run >/dev/null 2>&1
+ok "dry-run rejects a text edit on a CRDT entry" "$?" "1"
+"$CLI" --db "$DB" edit $DPK2 --journal "Test Journal" --dry-run >/dev/null 2>&1
+ok "dry-run rejects a journal move on a CRDT entry" "$?" "1"
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=NULL where Z_PK=$DPK2;"
+
+# A malformed media id refuses the whole edit.
+MM0=$(store_state)
+"$CLI" --db "$DB" edit $DPK2 --bookmark --remove-media abc >/dev/null 2>&1
+ok "malformed --remove-media id refused" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+ok "malformed id applied nothing" "$(store_state)" "$MM0"
+
+# Backups are private to their owner.
+BKP="$SB/backups-private"
+JOURNAL_BACKUP_DIR="$BKP" "$CLI" --db "$DB" edit $DPK2 --bookmark >/dev/null 2>&1
+BKDIR=$(find "$BKP" -mindepth 1 -maxdepth 1 -type d | head -1)
+ok "backup folder is owner-only" "$(stat -f %Lp "$BKDIR")" "700"
+ok "backup store is owner-only" "$(stat -f %Lp "$BKDIR/moments.sqlite")" "600"
+
+# A read that refuses still removes its temp snapshot.
+# The dry-run's unknown-journal refusal fires inside the snapshot. Count in
+# the real temp folder: NSTemporaryDirectory() ignores an overridden TMPDIR.
+TDIR="${TMPDIR:-/tmp}"
+SNAP0=$(find "$TDIR" -mindepth 1 -maxdepth 1 -name 'journal-cli.*' 2>/dev/null | wc -l | tr -d ' ')
+"$CLI" --db "$DB" edit $DPK2 --add-journal "No Such Journal $$" --dry-run >/dev/null 2>&1
+ok "refused read leaves no snapshot" "$(find "$TDIR" -mindepth 1 -maxdepth 1 -name 'journal-cli.*' 2>/dev/null | wc -l | tr -d ' ')" "$SNAP0"
+
+# Markdown export: link-only entries keep their link, and attachment paths
+# with spaces and parentheses stay valid link destinations.
+KOUT=$("$CLI" --db "$DB" write --link https://example.org/page --link-title "Example (page)" 2>&1)
+KPK=$(echo "$KOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+SBX=$(mktemp -d "/tmp/journal sandbox (x).XXXXXX")
+DBX=$("$CLI" sandbox --dir "$SBX" --from "$DB")
+XOUT=$("$CLI" --db "$DBX" write --body "Spaced path." --media "$IMG" 2>&1)
+XPK=$(echo "$XOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+EXX="$SBX/exp"; "$CLI" --db "$DBX" export --dir "$EXX" >/dev/null 2>&1
+ok "link-only entry exports its link" "$(entryfiles "$EXX" "$KPK" | while IFS= read -r f; do cat "$f"; done | grep -cF 'Example (page)](<https://example.org/page>)')" "1"
+# The Core Data epoch (ZENTRYDATE 0) is a real date: show and list agree.
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZENTRYDATE=0 where Z_PK=$KPK;"
+ok "epoch date shows" "$("$CLI" --db "$DB" show $KPK --json | jq_ 'd["date"]')" "$("$CLI" --db "$DB" list --json --include-empty --limit 100000 | jq_ '[e["date"] for e in d if e["id"]=='"$KPK"'][0]')"
+ok "spaced attachment path is a valid destination" "$(python3 -c '
+import glob,os,re,sys
+hits=[]
+for f in glob.glob(sys.argv[1]+"/*-"+sys.argv[2]+".md")+glob.glob(sys.argv[1]+"/*-"+sys.argv[2]+"-*.md"):
+    for m in re.finditer(r"!\[[^\]]*\]\(<((?:[^<>\\]|\\.)*)>\)", open(f).read()):
+        hits.append(os.path.exists(re.sub(r"\\(.)", r"\1", m.group(1))))
+print(bool(hits) and all(hits))' "$EXX" "$XPK")" "True"
+trash "$SBX" 2>/dev/null
 
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"

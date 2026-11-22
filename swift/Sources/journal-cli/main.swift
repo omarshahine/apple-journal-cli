@@ -85,13 +85,20 @@ while dbScan < argv.count {
     if tok == "--db" {
         guard dbScan + 1 < argv.count else { die("--db needs a value") }
         DB_PATH = (argv[dbScan + 1] as NSString).expandingTildeInPath
-        argv.removeSubrange(dbScan...(dbScan + 1))
+        // Leave a boundary where it was: deleting it outright would glue a
+        // list option's values to the positional after it
+        // (`--remove-media 5 --db X 42` must still end the list before 42).
+        argv.replaceSubrange(dbScan...(dbScan + 1), with: [ARG_BOUNDARY])
+        dbScan += 1
     } else if valueFlags.contains(tok) {
         dbScan += 2
     } else {
         dbScan += 1
     }
 }
+
+// A boundary before the command marks nothing: `--db X list` is just `list`.
+while argv.first == ARG_BOUNDARY { argv.removeFirst() }
 
 if argv.first == "--version" {
     print("journal-cli \(JOURNAL_CLI_VERSION)")

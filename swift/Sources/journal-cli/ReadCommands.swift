@@ -140,13 +140,46 @@ func cmdExport(_ a: Args) {
         if !files.isEmpty {
             out += "\n"
             for f in files {
-                out += "![\(f["name"] as? String ?? "file")](\(f["path"] as? String ?? ""))\n"
+                out += "![\(mdLabel(f["name"] as? String ?? "file"))](\(mdDest(f["path"] as? String ?? "")))\n"
             }
         }
+        // Content that lives in assets rather than files: an entry that is only
+        // a link, a voice memo or a drawing still has words worth exporting.
+        let extras = mdAssetText(assets)
+        if !extras.isEmpty { out += "\n" + extras.joined(separator: "\n") + "\n" }
         do { try out.write(toFile: dir + "/" + name, atomically: true, encoding: .utf8) }
         catch { die("cannot write \(dir)/\(name): \(error.localizedDescription)") }
     }
     print("Wrote \(payload.count) entries to \(dir)")
+}
+
+/// Markdown link text with its brackets and backslashes escaped.
+func mdLabel(_ s: String) -> String {
+    var out = ""
+    for ch in s { if "\\[]".contains(ch) { out.append("\\") }; out.append(ch) }
+    return out
+}
+
+/// A Markdown link destination that survives spaces and parentheses: the
+/// angle-bracket form, with "<", ">" and backslashes escaped.
+func mdDest(_ s: String) -> String {
+    var out = "<"
+    for ch in s { if "\\<>".contains(ch) { out.append("\\") }; out.append(ch) }
+    return out + ">"
+}
+
+/// Readable text carried by non-file assets: links, audio transcripts, drawings.
+func mdAssetText(_ assets: [[String: Any]]) -> [String] {
+    var lines: [String] = []
+    for a in assets {
+        if let url = a["url"] as? String, !url.isEmpty {
+            let title = (a["link_title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            lines.append("[\(mdLabel(title ?? url))](\(mdDest(url)))")
+        }
+        if let t = a["transcript"] as? String, !t.isEmpty { lines.append("Audio transcript: \(t)") }
+        if let t = a["drawing_text"] as? String, !t.isEmpty { lines.append("Drawing: \(t)") }
+    }
+    return lines
 }
 
 /// A double-quoted YAML scalar (JSON string syntax is a subset of YAML's).

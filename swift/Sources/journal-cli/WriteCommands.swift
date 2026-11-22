@@ -271,7 +271,14 @@ func cmdEdit(_ a: Args) {
     let locationSlim = locationSlim(a, hasLocation: hasLoc)
     let bookmark: Bool? = a.has("--bookmark") ? true : (a.has("--no-bookmark") ? false : nil)
     let touchesText = body != nil || title != nil
-    let removeMedia = a.values("--remove-media").compactMap { Int64($0) }
+    // Every id must parse: dropping a bad one would apply the rest of the edit
+    // and report success for a removal that never happened.
+    let removeMedia: [Int64] = a.values("--remove-media").map { v in
+        guard let n = Int64(v) else { die("--remove-media takes asset ids (numbers); got '\(v)'") }
+        return n
+    }
+    // Parse the date up front so --dry-run rejects a bad one too.
+    let newDate: Double? = a.value("--date").map { cd(parseDate($0)) }
     let addLink = a.value("--add-link")
 
     if !(touchesText || !media.isEmpty || hasLoc || a.has("--clear-location")
@@ -289,21 +296,14 @@ func cmdEdit(_ a: Args) {
             + "--add-journal/--remove-journal to change memberships one at a time")
     }
 
-    if a.has("--dry-run") {
-        let exists = withSnapshot { db in
-            db.one("select Z_PK from ZJOURNALENTRYMO where Z_PK=?", [pk]) != nil }
-        if !exists { die("no entry with id \(pk)") }
-        print("DRY RUN: would update entry \(pk). Nothing written.")
-        return
-    }
-    var removed = 0
-    var staged = false
-    withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
+    // Every refusal the real edit can make, checked read-only. --dry-run runs
+    // it against a snapshot; the real edit runs it inside its transaction
+    // before changing anything, so a refusal never leaves a half-applied edit.
+    func validate(_ db: DB) -> (row: [String: Any], moves: [JournalRow],
+                                adds: [JournalRow], removes: [JournalRow]) {
         guard let row = db.one("""
             select Z_PK, ZID, ZMERGEABLEATTRIBUTES from ZJOURNALENTRYMO where Z_PK=?
             """, [pk]) else { die("no entry with id \(pk)") }
-        let entryUUID = uString(row.b("ZID"))
-
         if touchesText, row.b("ZMERGEABLEATTRIBUTES") != nil, !a.has("--force") {
             die("entry \(pk) carries a ZMERGEABLEATTRIBUTES CRDT (Journal's merge copy\n"
                 + "  of the text). Editing ZTEXT alone can be reverted or duplicated on sync.\n"
@@ -315,6 +315,41 @@ func cmdEdit(_ a: Args) {
             die("entry \(pk) already has Journal merge attributes. A direct journal move\n"
                 + "  would be Mac-local and can be reverted by iCloud. Move it in Journal.app.")
         }
+        if !a.has("--remove-all-media") {
+            for apk in removeMedia {
+                guard let r = db.one("""
+                    select ZASSETTYPE from ZJOURNALENTRYASSETMO where Z_PK=? and ZENTRY=?
+                    """, [apk, pk]) else {
+                    die("entry \(pk) has no asset \(apk) (see `show \(pk) --json` for ids)")
+                }
+                let t = r.s("ZASSETTYPE") ?? "?"
+                guard MEDIA_TYPES.contains(t) else {
+                    die("asset \(apk) is type '\(t)', not media; refusing to remove it")
+                }
+            }
+        }
+        // Resolve every journal name before writing, so a typo can't leave a
+        // half-applied change.
+        let moves = moveTo.map { resolveJournal(db, $0) }
+        let adds = addTo.map { resolveJournal(db, $0) }
+        let removes = removeFrom.map { resolveJournal(db, $0) }
+        if adds.contains(where: { $0.isDefault }) {
+            die("the default journal holds every entry that is in no other journal; "
+                + "there is no membership to add")
+        }
+        return (row, moves, adds, removes)
+    }
+
+    if a.has("--dry-run") {
+        _ = withSnapshot { db in validate(db) }
+        print("DRY RUN: would update entry \(pk). Nothing written.")
+        return
+    }
+    var removed = 0
+    var staged = false
+    withLive(allowLiveDefault: a.has("--live"), acceptRisk: a.has("--accept-risk")) { db in
+        let (row, moves, adds, removes) = validate(db)
+        let entryUUID = uString(row.b("ZID"))
 
         var sets: [String] = []
         var vals: [Any?] = []
@@ -328,8 +363,7 @@ func cmdEdit(_ a: Args) {
             sets += ["ZTITLE=?", "ZSHOWTITLE=?"]
             vals += [empty ? nil : textToRTF(t), empty ? 0 : 1]
         }
-        if let dstr = a.value("--date") {
-            let ts = cd(parseDate(dstr))
+        if let ts = newDate {
             sets += ["ZENTRYDATE=?", "ZMOMENTDATEFORSORTING=?"]; vals += [ts, ts]
         }
         if let bm = bookmark { sets += ["ZFLAGGED=?"]; vals += [bm ? 1 : 0] }
@@ -408,14 +442,7 @@ func cmdEdit(_ a: Args) {
         // --journal keeps its existing meaning: it *moves*, replacing every membership
         // (repeat it to land in several). --add-journal and --remove-journal change one
         // membership without disturbing the others, which makes the sidebar usable as tags.
-        // Resolve every name before writing, so a typo can't leave a half-applied change.
-        let moves = moveTo.map { resolveJournal(db, $0) }
-        let adds = addTo.map { resolveJournal(db, $0) }
-        let removes = removeFrom.map { resolveJournal(db, $0) }
-        if adds.contains(where: { $0.isDefault }) {
-            die("the default journal holds every entry that is in no other journal; "
-                + "there is no membership to add")
-        }
+        // The names were resolved in validate(), before anything changed.
         if !moves.isEmpty {
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             for j in moves where !j.isDefault {

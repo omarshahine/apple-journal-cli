@@ -65,9 +65,10 @@ func photosLookup(_ path: String) -> String? {
     }
     guard FileManager.default.fileExists(atPath: PHOTOS_DB) else { return nil }
     var h: OpaquePointer?
-    guard sqlite3_open_v2(PHOTOS_DB, &h,
-                          SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let h = h else { return nil }
-    defer { sqlite3_close(h) }
+    let rc = sqlite3_open_v2(PHOTOS_DB, &h, SQLITE_OPEN_READONLY, nil)
+    // A failed open can still allocate a handle, which must be closed too.
+    defer { if let h = h { sqlite3_close(h) } }
+    guard rc == SQLITE_OK, let h = h else { return nil }
     var stmt: OpaquePointer?
     let sql = """
         select a.ZUUID, aa.ZORIGINALFILESIZE from ZASSET a

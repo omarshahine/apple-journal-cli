@@ -125,15 +125,19 @@ def backup(reason="write"):
     d, n = stem, 1
     while True:
         try:
-            os.mkdir(d); break
+            os.mkdir(d, 0o700); break      # owner-only: a full copy of the journal
         except FileExistsError:
             n += 1; d = f"{stem}-{n}"
         except OSError as e:
             die(f"backup failed: cannot create {d}: {e.strerror}\n  Nothing was written.")
+    dst = os.path.join(d, os.path.basename(DB))
     try:
-        sqlite_backup(DB, os.path.join(d, os.path.basename(DB)))
+        sqlite_backup(DB, dst)
     except sqlite3.Error as e:
+        shutil.rmtree(d, ignore_errors=True)    # no half-written recovery point
         die(f"backup failed: {e}\n  Nothing was written.")
+    for suf in ("", "-wal", "-shm"):
+        if os.path.exists(dst + suf): os.chmod(dst + suf, 0o600)
     return d
 
 
@@ -231,14 +235,18 @@ class Live:
             ensure_risk_accepted(self.accept)
             if journal_running():
                 die("Journal.app is running. Quit it first, then retry.")
+        # Take the write lock first and back up under it, so no other writer
+        # commits between the backup and this write. Readers (the backup's own
+        # connection included) are not blocked by a reserved lock.
+        self.conn = sqlite3.connect(DB, timeout=5)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("BEGIN IMMEDIATE")
         self.backup = None
         if self.is_default or BACKUP_OVERRIDE:
             self.backup = backup()
             print(f"backup: {self.backup}", file=sys.stderr)
         global LIVE_FILES
         LIVE_FILES = self.files = {"created": [], "removals": []}
-        self.conn = sqlite3.connect(DB)
-        self.conn.row_factory = sqlite3.Row
         return self.conn
     def __exit__(self, exc_type, *rest):
         global LIVE_FILES
@@ -348,7 +356,10 @@ def photos_lookup(path):
     if not os.path.exists(PHOTOS_DB):
         return None
     try:
-        c = sqlite3.connect(f"file:{PHOTOS_DB.replace(' ', '%20')}?mode=ro&immutable=1", uri=True)
+        # Plain read-only, not immutable=1: Photos keeps recent assets in its
+        # WAL, and immutable would ignore them.
+        from urllib.parse import quote
+        c = sqlite3.connect(f"file:{quote(PHOTOS_DB)}?mode=ro", uri=True, timeout=5)
         rows = c.execute("""select a.ZUUID, aa.ZORIGINALFILESIZE
                             from ZASSET a
                             join ZADDITIONALASSETATTRIBUTES aa on aa.ZASSET=a.Z_PK
@@ -485,7 +496,9 @@ def fetch_one(conn, pk):
         from ZJOURNALENTRYMO where Z_PK=?""", (pk,)).fetchone()
     if not r: return None
     ti, tx = rtf_batch([r["ZTITLE"], r["ZTEXT"]])
-    dt = datetime.datetime.fromtimestamp(r["ZENTRYDATE"] + EPOCH) if r["ZENTRYDATE"] else None
+    # 0 is a real date (2001-01-01, the Core Data epoch), not a missing one.
+    dt = (datetime.datetime.fromtimestamp(r["ZENTRYDATE"] + EPOCH)
+          if r["ZENTRYDATE"] is not None else None)
     return {"id": r["Z_PK"], "uuid": u_str(r["ZID"]),
             "date": dt.isoformat(sep=" ", timespec="seconds") if dt else None,
             "title": ti, "text": tx, "chars": r["ZTEXTLENGTH"] or 0,
@@ -647,7 +660,29 @@ def _export_md(a, ents):
             if files:
                 f.write("\n")
                 for x in files:
-                    f.write(f"![{x['name']}]({x['path']})\n")
+                    f.write(f"![{md_label(x['name'] or 'file')}]({md_dest(x['path'])})\n")
+            # Content that lives in assets rather than files.
+            extras = md_asset_text(e["assets"])
+            if extras:
+                f.write("\n" + "\n".join(extras) + "\n")
+
+def md_label(s):
+    """Markdown link text with brackets and backslashes escaped."""
+    return "".join("\\" + ch if ch in "\\[]" else ch for ch in s)
+
+def md_dest(s):
+    """Angle-bracket Markdown destination: survives spaces and parentheses."""
+    return "<" + "".join("\\" + ch if ch in "\\<>" else ch for ch in s) + ">"
+
+def md_asset_text(assets):
+    """Readable text carried by non-file assets: links, transcripts, drawings."""
+    lines = []
+    for a in assets:
+        if a.get("url"):
+            lines.append(f"[{md_label(a.get('link_title') or a['url'])}]({md_dest(a['url'])})")
+        if a.get("transcript"): lines.append(f"Audio transcript: {a['transcript']}")
+        if a.get("drawing_text"): lines.append(f"Drawing: {a['drawing_text']}")
+    return lines
 
 def cmd_stats(a):
     with Snapshot() as c:
@@ -1078,20 +1113,16 @@ def cmd_edit(a):
         die("--journal replaces every membership; use it alone, or use only "
             "--add-journal/--remove-journal to change memberships one at a time")
 
-    if a.dry_run:
-        with Snapshot() as c:
-            if not c.execute("select Z_PK from ZJOURNALENTRYMO where Z_PK=?", (a.id,)).fetchone():
-                die(f"no entry with id {a.id}")
-        print(f"DRY RUN: would update entry {a.id}. Nothing written.")
-        return
+    # Parse the date up front so --dry-run rejects a bad one too.
+    new_ts = cd(parse_date(a.date)) if a.date is not None else None
 
-    staged = False
-    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
+    def validate(conn):
+        """Every refusal the real edit can make, checked read-only: --dry-run
+        runs it on a snapshot, the real edit inside its transaction before
+        changing anything."""
         row = conn.execute("""select Z_PK, ZID, ZMERGEABLEATTRIBUTES
                               from ZJOURNALENTRYMO where Z_PK=?""", (a.id,)).fetchone()
         if not row: die(f"no entry with id {a.id}")
-        entry_uuid = u_str(row["ZID"])
-
         if touches_text and row["ZMERGEABLEATTRIBUTES"] is not None and not a.force:
             die(f"entry {a.id} carries a ZMERGEABLEATTRIBUTES CRDT (Journal's merge copy\n"
                 "  of the text). Editing ZTEXT alone can be reverted or duplicated on sync.\n"
@@ -1100,6 +1131,33 @@ def cmd_edit(a):
         if (a.journal or a.add_journal or a.remove_journal) and row["ZMERGEABLEATTRIBUTES"] is not None:
             die(f"entry {a.id} already has Journal merge attributes. A direct journal move\n"
                 "  would be Mac-local and can be reverted by iCloud. Move it in Journal.app.")
+        if not a.remove_all_media:
+            for apk in a.remove_media or []:
+                r = conn.execute("""select ZASSETTYPE from ZJOURNALENTRYASSETMO
+                                    where Z_PK=? and ZENTRY=?""", (apk, a.id)).fetchone()
+                if not r:
+                    die(f"entry {a.id} has no asset {apk} (see `show {a.id} --json` for ids)")
+                if r["ZASSETTYPE"] not in MEDIA_TYPES:
+                    die(f"asset {apk} is type {r['ZASSETTYPE']!r}, not media; refusing to remove it")
+        # resolve every name before writing, so a typo can't half-apply a change
+        moves = [resolve_journal(conn, sel) for sel in a.journal or []]
+        adds = [resolve_journal(conn, sel) for sel in a.add_journal or []]
+        removes = [resolve_journal(conn, sel) for sel in a.remove_journal or []]
+        if any(jdefault for _, _, jdefault in adds):
+            die("the default journal holds every entry that is in no other journal; "
+                "there is no membership to add")
+        return row, moves, adds, removes
+
+    if a.dry_run:
+        with Snapshot() as c:
+            validate(c)
+        print(f"DRY RUN: would update entry {a.id}. Nothing written.")
+        return
+
+    staged = False
+    with Live(allow_live_default=a.live, accept_risk=a.accept_risk) as conn:
+        row, moves, adds, removes = validate(conn)
+        entry_uuid = u_str(row["ZID"])
 
         sets, vals = [], []
         if body is not None:
@@ -1107,9 +1165,8 @@ def cmd_edit(a):
         if a.title is not None:
             sets += ["ZTITLE=?", "ZSHOWTITLE=?"]
             vals += [txt_to_rtf(a.title) if a.title.strip() else None, 1 if a.title.strip() else 0]
-        if a.date is not None:
-            ts = cd(parse_date(a.date))
-            sets += ["ZENTRYDATE=?", "ZMOMENTDATEFORSORTING=?"]; vals += [ts, ts]
+        if new_ts is not None:
+            sets += ["ZENTRYDATE=?", "ZMOMENTDATEFORSORTING=?"]; vals += [new_ts, new_ts]
         if bookmark is not None:
             sets += ["ZFLAGGED=?"]; vals += [1 if bookmark else 0]
         sets += ["ZUPDATEDDATE=?", "ZENTRYDATAUPDATEDATE=?", "ZISUPLOADEDTOCLOUD=0"]
@@ -1170,13 +1227,7 @@ def cmd_edit(a):
 
         if added: ordering_append(conn, a.id, added)
 
-        # resolve every name before writing, so a typo can't half-apply a change
-        moves = [resolve_journal(conn, sel) for sel in a.journal or []]
-        adds = [resolve_journal(conn, sel) for sel in a.add_journal or []]
-        removes = [resolve_journal(conn, sel) for sel in a.remove_journal or []]
-        if any(jdefault for _, _, jdefault in adds):
-            die("the default journal holds every entry that is in no other journal; "
-                "there is no membership to add")
+        # journal names were resolved in validate(), before anything changed
         if moves:
             conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (a.id,))
             for jpk, _, jdefault in moves:
@@ -1259,7 +1310,7 @@ def cmd_deleted(a):
     out = []
     for r, ti, tx in zip(rows, titles, texts):
         dt = (datetime.datetime.fromtimestamp(r["ZENTRYDATE"] + EPOCH)
-              .isoformat(sep=" ", timespec="seconds")) if r["ZENTRYDATE"] else None
+              .isoformat(sep=" ", timespec="seconds")) if r["ZENTRYDATE"] is not None else None
         dd = (datetime.datetime.fromtimestamp(r["ZRECENTLYDELETEDENTRYDATE"] + EPOCH)
               .isoformat(sep=" ", timespec="seconds")) if r["ZRECENTLYDELETEDENTRYDATE"] else None
         out.append({"id": r["Z_PK"], "date": dt, "deleted": dd,

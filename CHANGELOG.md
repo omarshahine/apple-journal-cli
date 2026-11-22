@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: third review pass
+
+- **`edit --dry-run` checks what the real edit checks:** the date, the
+  Journal-merge text and journal guards, journal names, and the assets named in
+  `--remove-media`. It used to report success for edits the real command
+  refuses. A non-numeric `--remove-media` id is now an error instead of being
+  dropped while the rest of the edit applied.
+- **Backups are owner-only** (folder 0700, store 0600), a failed backup leaves
+  no partial folder, and the write lock is taken before the backup, so no
+  other write can land between a recovery point and the write it protects.
+- **A refused read no longer leaves a copy of the journal in the temp folder.**
+- **Markdown export** keeps the readable content of link, voice-memo and
+  drawing assets, and writes attachment links that survive spaces and
+  parentheses in the path.
+- **`--db` between a list option and an argument** no longer merges them
+  (`edit --remove-media 5 --db X 42`).
+- Python reference: `--photos-link` sees Photos records still in its WAL, and
+  an entry dated exactly at the Core Data epoch shows its date.
+- Docs: the README's reading examples no longer include writes, the
+  development recipe runs from the right folder, and the skill lists `edit`'s
+  real flags (it cannot attach a Live Photo).
+
 ## 1.4.9
 
 ### Fixed: dayone-import attachment references

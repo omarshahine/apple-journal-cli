@@ -44,7 +44,12 @@ func withSnapshot<T>(_ body: (DB) -> T) -> T {
     let tmp = NSTemporaryDirectory() + "journal-cli." + uid()
     do { try fm.createDirectory(atPath: tmp, withIntermediateDirectories: true) }
     catch { die("cannot create a temp folder for the snapshot: \(error.localizedDescription)") }
-    defer { try? fm.removeItem(atPath: tmp) }
+    // `die` exits without unwinding, so a plain defer would leave a full copy
+    // of the journal behind on any refusal. Chain onto the fatal-exit cleanup
+    // (keeping whatever was registered before) as well.
+    let previous = DIE_CLEANUP
+    DIE_CLEANUP = { try? FileManager.default.removeItem(atPath: tmp); previous?() }
+    defer { DIE_CLEANUP = previous; try? fm.removeItem(atPath: tmp) }
     let copy = tmp + "/" + URL(fileURLWithPath: DB_PATH).lastPathComponent
     if let err = sqliteBackup(from: DB_PATH, to: copy) {
         if !fm.isReadableFile(atPath: DB_PATH) {
@@ -67,7 +72,9 @@ func takeBackup(reason: String = "write") -> String {
     let stem = root + "/" + f.string(from: Date()) + "-" + reason
     var dir = stem
     var n = 1
-    while mkdir(dir, 0o755) != 0 {
+    // Owner-only: a recovery point is a full copy of the journal (and gains
+    // removed media later), so nobody else on the Mac may read it.
+    while mkdir(dir, 0o700) != 0 {
         guard errno == EEXIST, n < 1000 else {
             die("backup failed: cannot create \(dir): \(String(cString: strerror(errno)))\n  Nothing was written.")
         }
@@ -75,7 +82,11 @@ func takeBackup(reason: String = "write") -> String {
     }
     let dst = dir + "/" + URL(fileURLWithPath: DB_PATH).lastPathComponent
     if let err = sqliteBackup(from: DB_PATH, to: dst) {
+        try? fm.removeItem(atPath: dir)          // no half-written recovery point
         die("backup failed: \(err)\n  Nothing was written.")
+    }
+    for suf in ["", "-wal", "-shm"] where fm.fileExists(atPath: dst + suf) {
+        chmod(dst + suf, 0o600)
     }
     return dir
 }
@@ -188,6 +199,13 @@ func withLive<T>(allowLiveDefault: Bool, acceptRisk: Bool = false, _ body: (DB) 
         ensureRiskAccepted(acceptFlag: acceptRisk)
         if journalRunning() { die("Journal.app is running. Quit it first, then retry.") }
     }
+    // Take the write lock first and back up under it: no other writer can
+    // commit between the backup and this write, so the recovery point is
+    // exactly the state this write changes. (Readers, including the backup's
+    // own connection, are not blocked by a reserved lock.)
+    let db = DB(path: DB_PATH)
+    sqlite3_busy_timeout(db.handle, 5000)
+    db.exec("BEGIN IMMEDIATE")
     var backup: String?
     if isDefault || BACKUP_OVERRIDE != nil {
         backup = takeBackup()
@@ -195,14 +213,14 @@ func withLive<T>(allowLiveDefault: Bool, acceptRisk: Bool = false, _ body: (DB) 
     }
     let files = LiveFiles()
     LIVE_FILES = files
+    let previous = DIE_CLEANUP
     DIE_CLEANUP = {
         for p in files.created.reversed() { try? FileManager.default.removeItem(atPath: p) }
+        previous?()
     }
-    let db = DB(path: DB_PATH)
-    db.exec("BEGIN")
     let out = body(db)
     db.exec("COMMIT")
-    DIE_CLEANUP = nil
+    DIE_CLEANUP = previous
     LIVE_FILES = nil
     applyRemovals(files, backup: backup)
     return out
