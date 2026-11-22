@@ -4,9 +4,16 @@ set -uo pipefail
 # JOURNAL_CLI overrides which binary is under test. Default: the Swift release
 # build if present, else the Python reference implementation.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# There is no silent fallback to the Python reference: a missing Swift build
+# would otherwise pass the suite against the wrong implementation.
 if [ -n "${JOURNAL_CLI:-}" ]; then CLI="$JOURNAL_CLI"
 elif [ -x "$ROOT/swift/.build/release/journal-cli" ]; then CLI="$ROOT/swift/.build/release/journal-cli"
-else CLI="$ROOT/reference/journal-cli.py"; fi
+else
+  echo "no Swift release build at swift/.build/release/journal-cli." >&2
+  echo "Build it: (cd swift && swift build -c release), or test the reference:" >&2
+  echo "  JOURNAL_CLI=$ROOT/reference/journal-cli.py tests/test_write.sh" >&2
+  exit 2
+fi
 echo "testing: $CLI"
 SB=$(mktemp -d /tmp/journal-sandbox.XXXXXX)
 # Seed from $JOURNAL_SEED if given (a backup), else the live store.
@@ -63,7 +70,7 @@ ok "--version matches npm/package.json" "$("$CLI" --version 2>&1)" "journal-cli 
 ok "--version exits 0" "$("$CLI" --version >/dev/null 2>&1; echo $?)" "0"
 
 echo "T1 guards"
-"$CLI" write --body x >/dev/null 2>&1; ok "refuses live without --live" "$?" "1"
+env -u JOURNAL_DB "$CLI" write --body x >/dev/null 2>&1; ok "refuses live without --live" "$?" "1"
 "$CLI" --db "$DB" write --lat 47.6 >/dev/null 2>&1; ok "lat without lon rejected" "$?" "1"
 "$CLI" --db "$DB" write --media /nope/missing.png >/dev/null 2>&1; ok "missing media rejected" "$?" "1"
 "$CLI" --db "$DB" write >/dev/null 2>&1; ok "empty write rejected" "$?" "1"
@@ -863,6 +870,62 @@ def dec(d):
     return unquote(re.sub(r"\\(.)", r"\1", d))
 print(bool(links) and all(("%0A" in l and "%0D" in l) and os.path.exists(dec(l)) for l in links))' "$EXN" "$NPK")" "True"
 trash "$(dirname "$SBN")" 2>/dev/null
+
+echo "T22 reads, ordering and locking"
+# Journal's built-in tips are not entries.
+TOUT=$("$CLI" --db "$DB" write --body "a tip" 2>&1)
+TPK=$(echo "$TOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZISTIP=1 where Z_PK=$TPK;"
+ok "tip rows are not listed" "$("$CLI" --db "$DB" list --json --include-empty --limit 100000 | jq_ '[e["id"] for e in d].count('"$TPK"')')" "0"
+
+# Coordinates export as numbers.
+COUT=$("$CLI" --db "$DB" write --body "coords" --lat 47.6 --lon -122.3 --place P 2>&1)
+CPK2=$(echo "$COUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+EXC="$SB/exp-coords"; "$CLI" --db "$DB" export --dir "$EXC" >/dev/null 2>&1
+ok "exported coordinates are numeric YAML" "$(entryfiles "$EXC" "$CPK2" | while IFS= read -r f; do grep -E '^    (lat|lon): ' "$f"; done | tr '\n' ' ')" "    lat: 47.6     lon: -122.3 "
+
+# Assets read in Journal's saved order; removed ones drop out, hidden ones are flagged.
+OOUT=$("$CLI" --db "$DB" write --body "order" --media "$IMG" "$MOV" 2>&1)
+OPK=$(echo "$OOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+FIRST=$("$CLI" --db "$DB" show $OPK --json | jq_ 'd["assets"][0]["type"]')
+python3 - "$DB" "$OPK" <<'PYORD'
+import json,sqlite3,sys
+c=sqlite3.connect(sys.argv[1]); pk=int(sys.argv[2])
+o=json.loads(c.execute("select ZASSETORDERING from ZJOURNALENTRYMO where Z_PK=?",(pk,)).fetchone()[0])
+c.execute("update ZJOURNALENTRYMO set ZASSETORDERING=? where Z_PK=?",(json.dumps([o[2],0,o[0],1]).encode(),pk)); c.commit()
+PYORD
+ok "assets follow the saved ordering" "$("$CLI" --db "$DB" show $OPK --json | jq_ 'd["assets"][0]["type"]!="'"$FIRST"'"')" "True"
+RAID=$("$CLI" --db "$DB" show $OPK --json | jq_ 'd["assets"][0]["id"]')
+sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISFULLYREMOVED=1 where Z_PK=$RAID;"
+ok "removed assets are not read" "$("$CLI" --db "$DB" show $OPK --json | jq_ 'len(d["assets"])')" "1"
+HAID=$("$CLI" --db "$DB" show $OPK --json | jq_ 'd["assets"][0]["id"]')
+sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1 where Z_PK=$HAID;"
+ok "hidden assets are flagged" "$("$CLI" --db "$DB" show $OPK --json | jq_ 'd["assets"][0].get("hidden")')" "True"
+
+# write --dry-run resolves journals; URL schemes are case-insensitive.
+"$CLI" --db "$DB" write --body x --journal "No Such Journal $$" --dry-run >/dev/null 2>&1
+ok "write dry-run rejects an unknown journal" "$?" "1"
+"$CLI" --db "$DB" write --body x --link "HTTPS://Example.org/page" --dry-run >/dev/null 2>&1
+ok "uppercase URL scheme accepted" "$?" "0"
+
+# One writer per store: a held write lock makes the next write wait, then go.
+LOCKF=$(python3 -c 'import os,pwd,sys;st=os.stat(sys.argv[1]);d=os.path.join(pwd.getpwuid(os.getuid()).pw_dir,"Library/Caches/journal-cli/locks");os.makedirs(d,mode=0o700,exist_ok=True);print(os.path.join(d,f"write-{st.st_dev}-{st.st_ino}.lock"))' "$DB")
+python3 - "$LOCKF" <<'PYLOCK' &
+import fcntl,os,sys,time
+fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX)
+open(sys.argv[1]+".held","w").close(); time.sleep(3)
+PYLOCK
+LPID=$!
+# Bounded: a helper that dies before taking the lock fails the test, not the suite.
+for _ in $(seq 1 50); do [ -f "$LOCKF.held" ] && break; kill -0 $LPID 2>/dev/null || break; sleep 0.1; done
+if [ -f "$LOCKF.held" ]; then
+  WOUT=$("$CLI" --db "$DB" write --body "after the lock" 2>&1); WRC=$?
+else
+  WOUT="lock helper did not start"; WRC=99
+fi
+wait $LPID 2>/dev/null; trash "$LOCKF.held" 2>/dev/null
+ok "a held write lock makes the write wait" "$(echo "$WOUT" | grep -c 'waiting for another journal-cli write')" "1"
+ok "the waiting write then succeeds" "$WRC" "0"
 
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"

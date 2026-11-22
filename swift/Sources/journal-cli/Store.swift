@@ -42,8 +42,11 @@ func withSnapshot<T>(_ body: (DB) -> T) -> T {
     let fm = FileManager.default
     guard fm.fileExists(atPath: DB_PATH) else { die("store not found at \(DB_PATH)") }
     let tmp = NSTemporaryDirectory() + "journal-cli." + uid()
-    do { try fm.createDirectory(atPath: tmp, withIntermediateDirectories: true) }
-    catch { die("cannot create a temp folder for the snapshot: \(error.localizedDescription)") }
+    // Owner-only before any journal data lands in it.
+    do {
+        try fm.createDirectory(atPath: tmp, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+    } catch { die("cannot create a temp folder for the snapshot: \(error.localizedDescription)") }
     // `die` exits without unwinding, so a plain defer would leave a full copy
     // of the journal behind on any refusal. Chain onto the fatal-exit cleanup
     // (keeping whatever was registered before) as well.
@@ -57,6 +60,7 @@ func withSnapshot<T>(_ body: (DB) -> T) -> T {
         }
         die("could not snapshot the store: \(err)")
     }
+    chmod(copy, 0o600)
     return body(DB(path: copy))
 }
 
@@ -189,8 +193,38 @@ func sameStore(_ a: String, _ b: String) -> Bool {
 }
 
 /// Read-write against the target store, with the real-store guards.
+/// One journal-cli writer per store at a time, for the whole write: backup,
+/// transaction, and the file moves after commit. SQLite's write lock covers
+/// only the middle part. Keyed by the store file's identity, so every path to
+/// it (symlink, hard link) shares one lock. Released when the process exits.
+private func lockStore(_ path: String) {
+    var st = stat()
+    guard stat(path, &st) == 0 else { return }
+    // One fixed, owner-only place (not the temp folder, which TMPDIR can move),
+    // under the account's real home -- the same one the Python reference uses.
+    let dir = NSHomeDirectory() + "/Library/Caches/journal-cli/locks"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                             attributes: [.posixPermissions: 0o700])
+    let lock = dir + "/write-\(st.st_dev)-\(st.st_ino).lock"
+    let fd = open(lock, O_CREAT | O_RDWR, 0o600)
+    guard fd >= 0 else { die("cannot open write lock \(lock): \(String(cString: strerror(errno)))") }
+    if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+        FileHandle.standardError.write("journal-cli: waiting for another journal-cli write to finish...\n"
+            .data(using: .utf8)!)
+        guard flock(fd, LOCK_EX) == 0 else { die("cannot take write lock \(lock)") }
+    }
+    // fd stays open (and locked) until the process exits.
+}
+
 func withLive<T>(allowLiveDefault: Bool, acceptRisk: Bool = false, _ body: (DB) -> T) -> T {
     let isDefault = sameStore(DB_PATH, DEFAULT_DB)
+    if isDefault && DB_PATH != DEFAULT_DB {
+        // A symlink or hard link to the real store is the real store: use its
+        // real path, so attachments, backups and removals land beside it rather
+        // than beside the alias.
+        DB_PATH = DEFAULT_DB
+    }
+    lockStore(DB_PATH)
     if isDefault {
         if !allowLiveDefault {
             die("refusing to modify the real Journal store without --live.\n"

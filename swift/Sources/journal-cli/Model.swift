@@ -32,6 +32,7 @@ func fetch(_ db: DB, since: Date? = nil, until: Date? = nil, includeEmpty: Bool 
                ZISUPLOADEDTOCLOUD, ZTITLE, ZTEXT
         from ZJOURNALENTRYMO
         where coalesce(ZISFULLYREMOVED,0)=0 and coalesce(ZRECENTLYDELETED,0)=0
+          and coalesce(ZISTIP,0)=0          -- Journal's built-in tips are not entries
         order by ZENTRYDATE desc
         """)
     var out: [Entry] = []
@@ -66,20 +67,43 @@ func fetchOne(_ db: DB, _ pk: Int64) -> Entry? {
 
 func assetsFor(_ db: DB, _ pk: Int64) -> [[String: Any]] {
     var out: [[String: Any]] = []
-    for r in db.query("""
-        select Z_PK, ZID, ZASSETTYPE, ZSOURCE, ZASSETMETADATA
-        from ZJOURNALENTRYASSETMO where ZENTRY=? order by Z_PK
-        """, [pk]) {
+    // Removed assets (fully or undoably) are not part of the entry. Hidden ones
+    // still are, so they are listed with "hidden": true rather than dropped.
+    let rows = db.query("""
+        select Z_PK, ZID, ZASSETTYPE, ZSOURCE, ZASSETMETADATA, ZISHIDDEN
+        from ZJOURNALENTRYASSETMO
+        where ZENTRY=? and coalesce(ZISFULLYREMOVED,0)=0 and coalesce(ZISUNDOABLYDELETED,0)=0
+        order by Z_PK
+        """, [pk])
+    // The entry's ZASSETORDERING ([uuid, position, uuid, position, ...]) is the
+    // order Journal shows; anything it doesn't list follows, by row id.
+    var position: [String: Int] = [:]
+    if let row = db.one("select ZASSETORDERING from ZJOURNALENTRYMO where Z_PK=?", [pk]),
+       let b = row.b("ZASSETORDERING"),
+       let list = (try? JSONSerialization.jsonObject(with: b)) as? [Any] {
+        var i = 0
+        while i + 1 < list.count {
+            if let u = list[i] as? String, let n = list[i + 1] as? Int { position[u.uppercased()] = n }
+            i += 2
+        }
+    }
+    let ordered = rows.enumerated().sorted { x, y in
+        let px = uString(x.element.b("ZID")).flatMap { position[$0.uppercased()] } ?? Int.max
+        let py = uString(y.element.b("ZID")).flatMap { position[$0.uppercased()] } ?? Int.max
+        return px != py ? px < py : x.offset < y.offset
+    }.map(\.element)
+    for r in ordered {
         let m = resolveMeta(r.b("ZASSETMETADATA")) ?? [:]
         let type = r.s("ZASSETTYPE") ?? "?"
         var a: [String: Any] = ["id": r.i("Z_PK") ?? 0, "uuid": uString(r.b("ZID")) as Any,
                                 "type": type, "source": r.s("ZSOURCE") as Any]
+        if r.flag("ZISHIDDEN") { a["hidden"] = true }
         switch type {
         case "multiPinMap", "genericMap":
             var places: [[String: Any]] = []
             for v in (m["visitsData"] as? [[String: Any]]) ?? [] where v["latitude"] != nil {
-                places.append(["name": v["placeName"] as Any, "city": v["city"] as Any,
-                               "lat": v["latitude"] as Any, "lon": v["longitude"] as Any])
+                places.append(["name": v["placeName"] ?? NSNull(), "city": v["city"] ?? NSNull(),
+                               "lat": v["latitude"] ?? NSNull(), "lon": v["longitude"] ?? NSNull()])
             }
             a["places"] = places
         case "audio":
@@ -98,14 +122,14 @@ func assetsFor(_ db: DB, _ pk: Int64) -> [[String: Any]] {
             if let title = title { a["link_title"] = title }
         default:
             if m["latitude"] != nil {
-                a["place"] = ["name": m["placeName"] as Any,
-                              "lat": m["latitude"] as Any, "lon": m["longitude"] as Any]
+                a["place"] = ["name": m["placeName"] ?? NSNull(),
+                              "lat": m["latitude"] ?? NSNull(), "lon": m["longitude"] ?? NSNull()]
             }
         }
         // photo/video may also carry a place
         if a["place"] == nil, ["photo", "video", "livePhoto"].contains(type), m["latitude"] != nil {
-            a["place"] = ["name": m["placeName"] as Any,
-                          "lat": m["latitude"] as Any, "lon": m["longitude"] as Any]
+            a["place"] = ["name": m["placeName"] ?? NSNull(),
+                          "lat": m["latitude"] ?? NSNull(), "lon": m["longitude"] ?? NSNull()]
         }
         var files: [[String: Any]] = []
         for f in db.query("""

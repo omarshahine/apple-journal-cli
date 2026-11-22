@@ -73,6 +73,9 @@ jobs:
           JOURNAL_CLI: ${{ github.workspace }}/reference/journal-cli.py
         run: tests/test_write.sh
 
+      - name: Reference unit tests
+        run: python3 -m unittest discover -s tests -p 'test_reference.py' -v
+
   test-dayone-import:
     name: Test (dayone-import skill)
     runs-on: macos-15

@@ -107,6 +107,7 @@ class Snapshot:
             if not os.access(DB, os.R_OK):
                 die("permission denied. Grant Full Disk Access to this terminal, then relaunch it.")
             die(f"could not snapshot the store: {e}")
+        os.chmod(copy, 0o600)       # mkdtemp's folder is already owner-only
         self.conn = sqlite3.connect(copy)
         self.conn.row_factory = sqlite3.Row
         return self.conn
@@ -221,6 +222,30 @@ def same_store(a, b):
         return False
 
 
+def lock_store(path):
+    """One journal-cli writer per store for the whole write (backup, transaction,
+    post-commit file moves), keyed by the store file's identity. Same lock file
+    as the Swift build, so the two never interleave."""
+    import fcntl
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    # One fixed, owner-only place under the account's real home (pwd, not
+    # $HOME, to match the Swift build's NSHomeDirectory), never the temp
+    # folder, which TMPDIR can move.
+    import pwd
+    d = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library/Caches/journal-cli/locks")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    lock = os.path.join(d, f"write-{st.st_dev}-{st.st_ino}.lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("journal-cli: waiting for another journal-cli write to finish...", file=sys.stderr)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    globals().setdefault("_LOCK_FDS", []).append(fd)   # held until exit
+
 class Live:
     """Read-write against the real store. Guarded."""
     def __init__(self, allow_live_default=False, accept_risk=False):
@@ -228,6 +253,10 @@ class Live:
         self.allow = allow_live_default
         self.accept = accept_risk
     def __enter__(self):
+        global DB
+        if self.is_default and DB != DEFAULT_DB:
+            DB = DEFAULT_DB          # an alias of the real store is the real store
+        lock_store(DB)
         if self.is_default:
             if not self.allow:
                 die("refusing to modify the real Journal store without --live.\n"
@@ -284,12 +313,18 @@ def rtf_batch(blobs):
         for i in idxs:
             n = os.path.join(d, f"{i}.rtf")
             open(n, "wb").write(blobs[i]); names.append(n)
-        r = subprocess.run(["textutil", "-convert", "txt"] + names, capture_output=True, timeout=180)
+        # Bounded batches: one textutil call per whole library overflows argv
+        # (and its timeout) on large journals.
+        err, failed = "", False
+        for k in range(0, len(names), 200):
+            r = subprocess.run(["textutil", "-convert", "txt"] + names[k:k + 200],
+                               capture_output=True, timeout=180)
+            if r.returncode != 0:
+                failed = True; err = r.stderr.decode(errors="replace").strip()
         missing = [i for i in idxs if not os.path.exists(os.path.join(d, f"{i}.txt"))]
         # A failed conversion must not read as empty text: fetch would drop the
         # entry and export would report success without it.
-        if r.returncode != 0 or missing:
-            err = r.stderr.decode(errors="replace").strip()
+        if failed or missing:
             die(f"textutil could not convert {len(missing) or 'some'} RTF blob(s)"
                 + (f": {err}" if err else ""))
         for i in idxs:
@@ -480,6 +515,7 @@ def fetch(conn, since=None, until=None, include_empty=False):
                ZISUPLOADEDTOCLOUD, ZTITLE, ZTEXT
         from ZJOURNALENTRYMO
         where coalesce(ZISFULLYREMOVED,0)=0 and coalesce(ZRECENTLYDELETED,0)=0
+          and coalesce(ZISTIP,0)=0
         order by ZENTRYDATE desc""").fetchall()
     titles = rtf_batch([r["ZTITLE"] for r in rows])
     texts  = rtf_batch([r["ZTEXT"] for r in rows])
@@ -515,15 +551,30 @@ def fetch_one(conn, pk):
             "synced": bool(r["ZISUPLOADEDTOCLOUD"])}
 
 def assets_for(conn, pk):
+    # Removed assets are not part of the entry; hidden ones are, flagged.
     rows = conn.execute("""
-        select Z_PK, ZID, ZASSETTYPE, ZSOURCE, ZASSETMETADATA
-        from ZJOURNALENTRYASSETMO where ZENTRY=? order by Z_PK""", (pk,)).fetchall()
+        select Z_PK, ZID, ZASSETTYPE, ZSOURCE, ZASSETMETADATA, ZISHIDDEN
+        from ZJOURNALENTRYASSETMO
+        where ZENTRY=? and coalesce(ZISFULLYREMOVED,0)=0 and coalesce(ZISUNDOABLYDELETED,0)=0
+        order by Z_PK""", (pk,)).fetchall()
+    # Journal's display order is the entry's ZASSETORDERING; unlisted follow.
+    pos = {}
+    er = conn.execute("select ZASSETORDERING from ZJOURNALENTRYMO where Z_PK=?", (pk,)).fetchone()
+    try:
+        lst = json.loads(er[0]) if er and er[0] else []
+    except (ValueError, TypeError):
+        lst = []
+    for i in range(0, len(lst) - 1, 2):
+        if isinstance(lst[i], str) and isinstance(lst[i + 1], int):
+            pos[lst[i].upper()] = lst[i + 1]
+    rows = sorted(rows, key=lambda r: pos.get((u_str(r["ZID"]) or "").upper(), float("inf")))
     out = []
     for r in rows:
         m = resolve_meta(r["ZASSETMETADATA"])
         if not isinstance(m, dict): m = {}
         a = {"id": r["Z_PK"], "uuid": u_str(r["ZID"]), "type": r["ZASSETTYPE"],
              "source": r["ZSOURCE"], "files": []}
+        if r["ZISHIDDEN"]: a["hidden"] = True
         if r["ZASSETTYPE"] in ("multiPinMap", "genericMap"):
             visits = m.get("visitsData") or []
             if not isinstance(visits, list): visits = []
@@ -663,7 +714,7 @@ def _export_md(a, ents):
                 f.write("locations:\n")
                 for p in places:
                     f.write(f"  - name: {json.dumps(p.get('name'))}\n"
-                            f"    lat: {p.get('lat')}\n    lon: {p.get('lon')}\n")
+                            f"    lat: {yaml_num(p.get('lat'))}\n    lon: {yaml_num(p.get('lon'))}\n")
             f.write("---\n\n" + e["text"] + "\n")
             files = [x for asset in e["assets"] for x in asset["files"]]
             if files:
@@ -674,6 +725,10 @@ def _export_md(a, ents):
             extras = md_asset_text(e["assets"])
             if extras:
                 f.write("\n" + "\n".join(extras) + "\n")
+
+def yaml_num(v):
+    """A numeric YAML scalar, or null ("None" would read as a string)."""
+    return "null" if v is None else repr(float(v)) if isinstance(v, float) else str(v)
 
 def md_label(s):
     """Markdown link text with brackets and backslashes escaped."""
@@ -969,6 +1024,10 @@ def cmd_write(a):
         if lp: bits.append("1 live photo")
         if a.link: bits.append("1 link")
         if has_loc: bits.append(f"location {a.lat:.5f},{a.lon:.5f}")
+        # resolve journals as the real write would, so an unknown one fails here too
+        if (a.journal or a.add_journal):
+            with Snapshot() as c:
+                for sel in (a.journal or []) + (a.add_journal or []): resolve_journal(c, sel)
         for j in (a.journal or []) + (a.add_journal or []): bits.append(f"journal {j!r}")
         print(f"DRY RUN: would create entry ({', '.join(bits) or 'empty'}) dated {when:%Y-%m-%d %H:%M}. Nothing written.")
         return
