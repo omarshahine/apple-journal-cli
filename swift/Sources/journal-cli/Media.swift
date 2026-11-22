@@ -25,7 +25,11 @@ func imageDims(_ path: String) -> (Int, Int) {
 @discardableResult
 func resizeInto(_ src: String, _ dst: String) throws -> Bool {
     let (w, h) = imageDims(src)
-    if max(w, h) > RESIZE_MAX,
+    // Thumbnailing reads frame 0 only, so an animated GIF (or any multi-frame
+    // image) would lose its animation. Copy those unchanged.
+    let frames = CGImageSourceCreateWithURL(URL(fileURLWithPath: src) as CFURL, nil)
+        .map { CGImageSourceGetCount($0) } ?? 1
+    if max(w, h) > RESIZE_MAX, frames <= 1,
        let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: src) as CFURL, nil),
        let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, [
            kCGImageSourceCreateThumbnailFromImageAlways: true,

@@ -539,6 +539,8 @@ if [ $? -eq 0 ]; then
   ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
   ok "image syntax untouched"         "$(printf '![alt](https://e.com/i.png)' | "$CLI" render --plain)" '![alt](https://e.com/i.png)'
   ok "link destination kept literal"  "$("$CLI" render --body '[link](https://example.com/*item*)' --plain)" "link (https://example.com/*item*)"
+  ok "fenced blank lines kept"          "$(printf '```\na\n\n\nb\n  \nc\n```' | "$CLI" render --plain | python3 -c 'import sys;print(repr(sys.stdin.read()))')" "'a\\n\\n\\nb\\n  \\nc'"
+  ok "trailing fenced blank lines kept" "$(printf '```\na\n\n\n```' | "$CLI" render | python3 -c 'import sys;r=sys.stdin.read();print(r[r.rindex(" a")+2:].count(chr(92)+chr(10)))')" "2"
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
   # Fixed-format dates ignore the user's calendar (-AppleLocale is a
   # Foundation argument-domain default, honored per process).
@@ -737,6 +739,19 @@ sqlite3 "$PHDB" "update ZADDITIONALASSETATTRIBUTES set ZORIGINALFILESIZE=$SIZE;"
 POUT=$(JOURNAL_PHOTOS_DB="$PHDB" "$CLI" --db "$DB" write --body "That photo." --media "$SB/IMG_0001.png" --photos-link 2>&1)
 PPK=$(echo "$POUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 ok "same-sized namesake is linked" "$(sqlite3 "$DB" "select max(instr(coalesce(ZASSETMETADATA,''),'11111111-2222-3333-4444-555555555555')>0) from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "1"
+
+echo "T20 content survives"
+# An animated GIF over the resize limit is stored unchanged: thumbnailing
+# would keep frame 0 only.
+GIF="$SB/anim.gif"
+python3 "$ROOT/tests/make-gif.py" "$GIF"
+GOUT=$("$CLI" --db "$DB" write --body "Animated." --media "$GIF" 2>&1)
+GPK=$(echo "$GOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+GSTORED=$("$CLI" --db "$DB" show $GPK --json | jq_ '[f["path"] for a in d["assets"] for f in a["files"]][0]')
+ok "animated GIF stored unchanged" "$(cmp -s "$GIF" "$GSTORED" && echo same || echo changed)" "same"
+# Embedded NUL in a text column survives a read.
+sqlite3 "$DB" "update ZJOURNALENTRYASSETFILEATTACHMENTMO set ZFILEPATH = ZFILEPATH || char(0) || 'tail' where ZASSET in (select Z_PK from ZJOURNALENTRYASSETMO where ZENTRY=$GPK);"
+ok "embedded NUL survives a read" "$("$CLI" --db "$DB" show $GPK --json | jq_ '[f["path"] for a in d["assets"] for f in a["files"]][0].endswith(chr(0)+"tail")')" "True"
 
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"

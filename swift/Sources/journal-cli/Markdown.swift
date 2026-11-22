@@ -170,6 +170,7 @@ private struct Span {
 
 private enum LineKind: Equatable {
     case body
+    case code      // a fenced line: literal, never collapsed or trimmed
     case bullet
     case ordered
     case quote
@@ -276,7 +277,7 @@ func markdownToAttributed(_ md: String) -> NSAttributedString {
             if let run = capture(raw, FENCE_CLOSE, 1), run.count >= fenceLen {
                 fenceLen = 0; continue
             }
-            kinds.append(.body)
+            kinds.append(.code)
             contents.append([Span(text: raw)])
             continue
         }
@@ -305,6 +306,7 @@ func markdownToAttributed(_ md: String) -> NSAttributedString {
     let plain = NSFont.systemFont(ofSize: BASE_SIZE)
     var blanks = 0
     var index = 0
+    var codeEnd = 0                         // out.length just after the last code line
 
     while index < kinds.count {
         let kind = kinds[index]
@@ -334,6 +336,16 @@ func markdownToAttributed(_ md: String) -> NSAttributedString {
 
         let spans = contents[index]
         index += 1
+        if kind == .code {
+            // Fenced content is literal: blank and whitespace-only lines stay
+            // exactly as written, so the prose blank-collapsing below must not
+            // see them.
+            out.append(NSAttributedString(string: spans.map(\.text).joined() + "\n",
+                                          attributes: [.font: plain]))
+            codeEnd = out.length
+            blanks = 0
+            continue
+        }
         if spans.allSatisfy({ $0.text.trimmingCharacters(in: .whitespaces).isEmpty }) {
             // Collapse runs of blanks left behind by dropped rules.
             blanks += 1
@@ -352,7 +364,9 @@ func markdownToAttributed(_ md: String) -> NSAttributedString {
         out.append(NSAttributedString(string: "\n", attributes: [.font: plain]))
     }
 
-    while out.length > 0, out.string.hasSuffix("\n") {
+    // Trim trailing newlines, but not into a final fenced block: only its last
+    // line's terminator goes, so blank lines it ends with stay.
+    while out.length > max(codeEnd - 1, 0), out.string.hasSuffix("\n") {
         out.deleteCharacters(in: NSRange(location: out.length - 1, length: 1))
     }
     return out

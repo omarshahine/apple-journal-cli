@@ -206,10 +206,21 @@ def ensure_risk_accepted(accept_flag):
         "  Re-run with --accept-risk (agents: ask the user before passing this).")
 
 
+def same_store(a, b):
+    """Same database file? A hard link to the real store has its own path, and
+    treating it as a sandbox would skip every live-write guard."""
+    if os.path.realpath(a) == os.path.realpath(b):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 class Live:
     """Read-write against the real store. Guarded."""
     def __init__(self, allow_live_default=False, accept_risk=False):
-        self.is_default = os.path.realpath(DB) == os.path.realpath(DEFAULT_DB)
+        self.is_default = same_store(DB, DEFAULT_DB)
         self.allow = allow_live_default
         self.accept = accept_risk
     def __enter__(self):
@@ -310,7 +321,9 @@ def image_dims(path):
 def resize_into(src, dst):
     """Copy src to dst, downscaling to RESIZE_MAX long edge like Journal does."""
     w, h = image_dims(src)
-    if max(w, h) > RESIZE_MAX:
+    # sips keeps only the first frame, so an animated GIF would lose its
+    # animation. Copy GIFs unchanged.
+    if max(w, h) > RESIZE_MAX and os.path.splitext(src)[1].lower() != ".gif":
         r = subprocess.run(["sips", "-Z", str(RESIZE_MAX), src, "--out", dst],
                            capture_output=True, timeout=120)
         if r.returncode == 0 and os.path.exists(dst):
