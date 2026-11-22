@@ -14,7 +14,7 @@ import argparse, json, os, shutil, sqlite3, stat, subprocess, sys, tempfile, uui
 
 GROUP = os.path.expanduser("~/Library/Group Containers/group.com.apple.moments/Library")
 DEFAULT_DB = os.path.join(GROUP, "moments.sqlite")
-VERSION = "1.4.1"                      # keep in step with npm/package.json
+VERSION = "1.4.2"                      # keep in step with npm/package.json
 BACKUPS = os.path.expanduser("~/Backups/journal-cli")
 EPOCH = 978307200                      # Core Data reference date -> unix epoch
 
