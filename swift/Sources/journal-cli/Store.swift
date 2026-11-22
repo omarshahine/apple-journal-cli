@@ -200,7 +200,12 @@ func sameStore(_ a: String, _ b: String) -> Bool {
 private func lockStore(_ path: String) {
     var st = stat()
     guard stat(path, &st) == 0 else { return }
-    let lock = NSTemporaryDirectory() + "journal-cli-write-\(st.st_dev)-\(st.st_ino).lock"
+    // One fixed, owner-only place (not the temp folder, which TMPDIR can move),
+    // under the account's real home -- the same one the Python reference uses.
+    let dir = NSHomeDirectory() + "/Library/Caches/journal-cli/locks"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                             attributes: [.posixPermissions: 0o700])
+    let lock = dir + "/write-\(st.st_dev)-\(st.st_ino).lock"
     let fd = open(lock, O_CREAT | O_RDWR, 0o600)
     guard fd >= 0 else { die("cannot open write lock \(lock): \(String(cString: strerror(errno)))") }
     if flock(fd, LOCK_EX | LOCK_NB) != 0 {

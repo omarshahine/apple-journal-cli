@@ -909,15 +909,21 @@ ok "write dry-run rejects an unknown journal" "$?" "1"
 ok "uppercase URL scheme accepted" "$?" "0"
 
 # One writer per store: a held write lock makes the next write wait, then go.
-LOCKF=$(python3 -c 'import os,sys,tempfile;st=os.stat(sys.argv[1]);print(os.path.join(tempfile.gettempdir(),f"journal-cli-write-{st.st_dev}-{st.st_ino}.lock"))' "$DB")
+LOCKF=$(python3 -c 'import os,pwd,sys;st=os.stat(sys.argv[1]);d=os.path.join(pwd.getpwuid(os.getuid()).pw_dir,"Library/Caches/journal-cli/locks");os.makedirs(d,mode=0o700,exist_ok=True);print(os.path.join(d,f"write-{st.st_dev}-{st.st_ino}.lock"))' "$DB")
 python3 - "$LOCKF" <<'PYLOCK' &
 import fcntl,os,sys,time
 fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600); fcntl.flock(fd,fcntl.LOCK_EX)
 open(sys.argv[1]+".held","w").close(); time.sleep(3)
 PYLOCK
-until [ -f "$LOCKF.held" ]; do sleep 0.1; done
-WOUT=$("$CLI" --db "$DB" write --body "after the lock" 2>&1); WRC=$?
-wait; trash "$LOCKF.held" 2>/dev/null
+LPID=$!
+# Bounded: a helper that dies before taking the lock fails the test, not the suite.
+for _ in $(seq 1 50); do [ -f "$LOCKF.held" ] && break; kill -0 $LPID 2>/dev/null || break; sleep 0.1; done
+if [ -f "$LOCKF.held" ]; then
+  WOUT=$("$CLI" --db "$DB" write --body "after the lock" 2>&1); WRC=$?
+else
+  WOUT="lock helper did not start"; WRC=99
+fi
+wait $LPID 2>/dev/null; trash "$LOCKF.held" 2>/dev/null
 ok "a held write lock makes the write wait" "$(echo "$WOUT" | grep -c 'waiting for another journal-cli write')" "1"
 ok "the waiting write then succeeds" "$WRC" "0"
 

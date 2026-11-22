@@ -231,7 +231,13 @@ def lock_store(path):
         st = os.stat(path)
     except OSError:
         return
-    lock = os.path.join(tempfile.gettempdir(), f"journal-cli-write-{st.st_dev}-{st.st_ino}.lock")
+    # One fixed, owner-only place under the account's real home (pwd, not
+    # $HOME, to match the Swift build's NSHomeDirectory), never the temp
+    # folder, which TMPDIR can move.
+    import pwd
+    d = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library/Caches/journal-cli/locks")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    lock = os.path.join(d, f"write-{st.st_dev}-{st.st_ino}.lock")
     fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
