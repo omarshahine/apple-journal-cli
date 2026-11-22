@@ -236,6 +236,15 @@ class ExifTests(Tmp):
             fh.write(data)
         return f
 
+    def test_gps_ref_must_be_letter_and_nul_within_the_data(self):
+        tiff = b"N\x00" + b"\x00" * 6
+        self.assertEqual(exifgps._ref(tiff, (2, 2, 0), "NS"), "N")
+        self.assertEqual(exifgps._ref(tiff, (2, 1, 0), "NS"), "N")
+        # Declares 500 bytes with 8 available: damage, not a direction.
+        self.assertIsNone(exifgps._ref(tiff, (2, 500, 0), "NS"))
+        # A second byte that is not NUL is not a GPS ref either.
+        self.assertIsNone(exifgps._ref(b"NX" + b"\x00" * 6, (2, 2, 0), "NS"))
+
     def test_valid_gps_reads(self):
         g = exifgps.read(self._write("ok.jpg", jpeg_with_gps()))
         self.assertAlmostEqual(g["lat"], 47.6, places=3)
