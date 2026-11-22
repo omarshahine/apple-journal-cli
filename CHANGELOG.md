@@ -1,8 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.5.0
 
 ### Fixed: third review pass
+
+([#30](https://github.com/omarshahine/apple-journal-cli/pull/30),
+[#31](https://github.com/omarshahine/apple-journal-cli/pull/31))
+
+- **Markdown rendering:** nested bold (`**a __b__ c**`) stays bold, and text
+  using private-use characters is no longer at risk of corruption.
+- **dayone-import:** malformed photo GPS no longer produces made-up
+  coordinates, location matching works across the 180° meridian, and entries
+  recorded in a fixed-offset zone (such as `GMT+0100`) keep it instead of being
+  read as UTC. Ledgers written with the old UTC reading still verify.
 
 - **`edit --dry-run` checks what the real edit checks:** the date, the
   Journal-merge text and journal guards, journal names, and the assets named in
