@@ -218,7 +218,7 @@ humans:
 | `--dry-run` | every mutating command can print its plan and write nothing |
 | `--live` gate | writes to the real store refuse to run without it |
 | App check | writes refuse to run while Journal.app is open |
-| Auto-backup | every live write backs the store up to its own folder in `~/Backups/journal-cli/` first, and is refused if that fails. Media that `edit --remove-media`, `delete --hard` or `empty` removes is moved into that backup's `Attachments/` after the write commits, so restoring the backup restores the files too |
+| Auto-backup | every live write backs the store up to its own folder in `~/Backups/journal-cli/` first, and is refused if that fails. Media that `edit --remove-media`, `delete --hard` or `empty` removes is moved into that backup's `Attachments/` after the write commits, so restoring the backup restores the files too. Backups restore *in place*: they hold the database and the media a write removed, not a copy of the whole attachment library or `.moments_SUPPORT` (which journal-cli never deletes) |
 | Body input | an unreadable or non-UTF-8 `--body-file` (or stdin) is an error, never an empty body; an empty file still clears the text on purpose |
 | Failed writes | a write that fails part way rolls back and removes any attachment folders it created; files it was going to remove stay until the commit |
 | Synced hard-deletes | refused without `--force`: a local row delete does not tombstone the CloudKit record, and the entry **resurrects on the next sync** (observed). Soft delete syncs properly. |
