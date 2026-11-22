@@ -155,6 +155,8 @@ def load_state(path, journal_name, target_db=None, source_db=None):
         if meta.get("source") not in (None, source):
             die("ledger %s was built from Day One store %s, not %s. Pass "
                 "--state to choose another." % (path, meta["source"], source))
+        if meta.get("source") is None or meta.get("target") is None:
+            state["_retag"] = True           # tagged by an older version: save the full tag
     elif state["done"]:
         state["_legacy"] = True
     state["meta"] = {"journal": journal_name, "target": target, "source": source}
@@ -169,17 +171,20 @@ def verify_legacy(args, state, state_path, entries):
     real store (its ids point at other entries), so it is refused before an
     import skips anything or a repair edits the wrong entry.
     """
+    retag = state.pop("_retag", False)
     if not state.pop("_legacy", False):
+        if retag and not getattr(args, "dry_run", False):
+            save_state(state_path, state)    # add the fields older tags lack
         return
     rows = {r["id"]: r for r in _destination_rows(args.cli, args.target_db)}
     by_uuid = {e["uuid"]: e for e in entries}
-    bad = []
+    bad, checked = [], 0
     for uuid, pk in state["done"].items():
         if type(pk) is not int:
             continue                         # older "True" marks carry no id
+        checked += 1
         e, row = by_uuid.get(uuid), rows.get(pk)
-        want = {_wall_epoch(e.get("local")), _wall_epoch(e.get("utc"))} if e else set()
-        if row is None or row["epoch"] not in want:
+        if e is None or row is None or not _same_write(row["epoch"], e):
             bad.append((uuid, pk))
     if bad:
         die("ledger %s predates destination tagging, and %d of its entries do "
@@ -187,8 +192,34 @@ def verify_legacy(args, state, state_path, entries):
             "ledger. Move it aside, or pass --state / --target-db for the store "
             "it belongs to." % (state_path, len(bad), _target_id(args.target_db),
                                 bad[0][0], bad[0][1]))
+    if not checked:
+        # Only id-less marks: nothing ties this ledger to this store, and a
+        # rehearsal's marks would make the import skip entries it never wrote.
+        die("ledger %s predates destination tagging and records no entry ids, "
+            "so it cannot be checked against %s. Move it aside to import from "
+            "scratch, or pass --state." % (state_path, _target_id(args.target_db)))
     if not getattr(args, "dry_run", False):
         save_state(state_path, state)        # now tagged: verified once
+
+
+def _same_write(epoch, e):
+    """Whether a destination instant is the one this Day One entry was written at.
+
+    The import read --date in the Mac's zone at the time, which may not be
+    today's. A time-zone change moves the instant by a whole number of
+    quarter hours within +/-14h; an unrelated entry essentially never lines up
+    to the second that way.
+    """
+    if epoch is None:
+        return False
+    for stamp in (e.get("local"), e.get("utc")):
+        want = _wall_epoch(stamp)
+        if want is None:
+            continue
+        diff = epoch - want
+        if abs(diff) <= 14 * 3600 and diff % 900 == 0:
+            return True
+    return False
 
 
 def save_state(path, state):
