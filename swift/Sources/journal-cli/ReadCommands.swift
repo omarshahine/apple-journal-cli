@@ -163,7 +163,7 @@ func mdLabel(_ s: String) -> String {
 
 /// A Markdown link destination that survives spaces and parentheses: the
 /// angle-bracket form, with "<", ">" and backslashes escaped.
-func mdDest(_ s: String) -> String {
+func mdDest(_ s: String, isPath: Bool = true) -> String {
     var out = "<"
     for ch in s {
         switch ch {
@@ -171,11 +171,12 @@ func mdDest(_ s: String) -> String {
         case "\n": out += "%0A"
         case "\r": out += "%0D"
         case "\r\n": out += "%0D%0A"
-        // URL syntax a renderer would act on: "%20" would decode to a space,
-        // and "#"/"?" would cut the path short.
-        case "%": out += "%25"
-        case "#": out += "%23"
-        case "?": out += "%3F"
+        // In a file path, URL syntax a renderer would act on: "%20" would
+        // decode to a space, and "#"/"?" would cut the path short. A web
+        // link's own query, fragment and escapes are left as they are.
+        case "%" where isPath: out += "%25"
+        case "#" where isPath: out += "%23"
+        case "?" where isPath: out += "%3F"
         // "&" would start an entity: "&copy;" names a different path.
         case "\\", "<", ">", "&": out.append("\\"); out.append(ch)
         default: out.append(ch)
@@ -190,7 +191,7 @@ func mdAssetText(_ assets: [[String: Any]]) -> [String] {
     for a in assets {
         if let url = a["url"] as? String, !url.isEmpty {
             let title = (a["link_title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            lines.append("[\(mdLabel(title ?? url))](\(mdDest(url)))")
+            lines.append("[\(mdLabel(title ?? url))](\(mdDest(url, isPath: false)))")
         }
         if let t = a["transcript"] as? String, !t.isEmpty { lines.append("Audio transcript: \(t)") }
         if let t = a["drawing_text"] as? String, !t.isEmpty { lines.append("Drawing: \(t)") }

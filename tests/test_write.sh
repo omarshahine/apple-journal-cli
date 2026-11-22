@@ -821,14 +821,14 @@ ok "refused read leaves no snapshot" "$(find "$TDIR" -mindepth 1 -maxdepth 1 -na
 
 # Markdown export: link-only entries keep their link, and attachment paths
 # with spaces and parentheses stay valid link destinations.
-KOUT=$("$CLI" --db "$DB" write --link https://example.org/page --link-title "Example (page)" 2>&1)
+KOUT=$("$CLI" --db "$DB" write --link 'https://example.org/page?q=cats&n=2#top%20x' --link-title "Example (page)" 2>&1)
 KPK=$(echo "$KOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 SBX=$(mktemp -d "/tmp/journal sandbox &copy; (x).XXXXXX")
 DBX=$("$CLI" sandbox --dir "$SBX" --from "$DB")
 XOUT=$("$CLI" --db "$DBX" write --body "Spaced path." --media "$IMG" 2>&1)
 XPK=$(echo "$XOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 EXX="$SBX/exp"; "$CLI" --db "$DBX" export --dir "$EXX" >/dev/null 2>&1
-ok "link-only entry exports its link" "$(entryfiles "$EXX" "$KPK" | while IFS= read -r f; do cat "$f"; done | grep -cF 'Example (page)](<https://example.org/page>)')" "1"
+ok "link-only entry exports its link, query and fragment intact" "$(entryfiles "$EXX" "$KPK" | while IFS= read -r f; do cat "$f"; done | grep -cF 'Example (page)](<https://example.org/page?q=cats\&n=2#top%20x>)')" "1"
 # The Core Data epoch (ZENTRYDATE 0) is a real date: show and list agree.
 sqlite3 "$DB" "update ZJOURNALENTRYMO set ZENTRYDATE=0 where Z_PK=$KPK;"
 ok "epoch date shows" "$("$CLI" --db "$DB" show $KPK --json | jq_ 'd["date"]')" "$("$CLI" --db "$DB" list --json --include-empty --limit 100000 | jq_ '[e["date"] for e in d if e["id"]=='"$KPK"'][0]')"
