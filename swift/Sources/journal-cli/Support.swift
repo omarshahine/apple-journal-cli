@@ -68,7 +68,7 @@ func journalRunning() -> Bool {
 /// Fixed-format dates must not follow the user's calendar or locale: a
 /// Buddhist or Japanese calendar would otherwise turn 2026 into 2569 or 0008.
 /// The time zone stays local, since entry dates are local wall-clock times.
-private func fixedFormatter(_ format: String) -> DateFormatter {
+func fixedFormatter(_ format: String) -> DateFormatter {
     let f = DateFormatter()
     f.locale = Locale(identifier: "en_US_POSIX")
     f.calendar = Calendar(identifier: .gregorian)

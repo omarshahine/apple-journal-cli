@@ -542,9 +542,12 @@ if [ $? -eq 0 ]; then
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
   # Fixed-format dates ignore the user's calendar (-AppleLocale is a
   # Foundation argument-domain default, honored per process).
-  CALOUT=$("$CLI" --db "$DB" write --body "calendar" --date 2026-01-05 2>&1)
+  BUD="th_TH@calendar=buddhist"
+  CALOUT=$("$CLI" --db "$DB" write --body "calendar" --date 2026-01-05 -AppleLocale "$BUD" 2>&1)
   CALPK=$(echo "$CALOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
-  ok "dates stay Gregorian under a Buddhist calendar" "$("$CLI" --db "$DB" show $CALPK --json -AppleLocale th_TH@calendar=buddhist | jq_ 'd["date"][:10]')" "2026-01-05"
+  ok "--date parses as Gregorian under a Buddhist calendar" "$("$CLI" --db "$DB" show $CALPK --json | jq_ 'd["date"][:10]')" "2026-01-05"
+  ok "write reports a Gregorian date" "$(echo "$CALOUT" | grep -c 'dated 2026-01-05')" "1"
+  ok "show prints Gregorian under a Buddhist calendar" "$("$CLI" --db "$DB" show $CALPK --json -AppleLocale "$BUD" | jq_ 'd["date"][:10]')" "2026-01-05"
 
   # The global --db pass must not take an option's value for itself. It used
   # to treat `--body --db` as a database selector and eat the next argument.

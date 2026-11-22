@@ -142,7 +142,7 @@ func cmdWrite(_ a: Args) {
         if link != nil { bits.append("1 link") }
         if hasLoc { bits.append(String(format: "location %.5f,%.5f", lat!, lon!)) }
         for j in a.values("--journal") + a.values("--add-journal") { bits.append("journal '\(j)'") }
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
+        let f = fixedFormatter("yyyy-MM-dd HH:mm")
         print("DRY RUN: would create entry (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)). Nothing written.")
         return
     }
@@ -247,7 +247,7 @@ func cmdWrite(_ a: Args) {
     if link != nil { bits.append("1 link") }
     if hasLoc { bits.append(String(format: "location %.5f,%.5f", lat!, lon!)) }
     for j in a.values("--journal") + a.values("--add-journal") { bits.append("journal '\(j)'") }
-    let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
+    let f = fixedFormatter("yyyy-MM-dd HH:mm")
     print("Created entry \(created.pk) (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)).")
     if a.has("--live") {
         FileHandle.standardError.write(

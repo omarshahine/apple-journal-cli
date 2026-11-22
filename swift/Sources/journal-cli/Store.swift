@@ -63,7 +63,7 @@ func takeBackup(reason: String = "write") -> String {
     let root = BACKUPS_DIR
     do { try fm.createDirectory(atPath: root, withIntermediateDirectories: true) }
     catch { die("backup failed: cannot create \(root): \(error.localizedDescription)\n  Nothing was written.") }
-    let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"
+    let f = fixedFormatter("yyyyMMdd-HHmmss")
     let stem = root + "/" + f.string(from: Date()) + "-" + reason
     var dir = stem
     var n = 1
