@@ -561,6 +561,28 @@ class ImportTests(Tmp):
         self.assertTrue(di._same_content(row, e))
         self.assertFalse(di._same_content({"title": "", "text": "1. Slept in"}, e))
 
+    def test_shared_opening_with_different_ending_is_not_the_same_entry(self):
+        db = self.p("intro.sqlite")
+        body = "Dear diary, today I woke up early and went for a long walk by the lake"
+        make_dayone(db, [(1, "D" * 32, 1700000000, "D" * 32 + "\n" + body + " and swam.")])
+        with dayone.connect(db) as con:
+            e = dayone.read_entries(con, dayone.resolve_journal(con, "Travel")["pk"], {})[0]
+        self.assertTrue(di._same_content({"title": "", "text": body + " and swam."}, e))
+        self.assertFalse(di._same_content({"title": "", "text": body + " and then ate pancakes."}, e))
+
+    def test_a_mapping_off_the_ledgers_shift_is_refused(self):
+        # A and B line up exactly; C's entry is a quarter hour off. One import
+        # ran in one zone, so C is not that import's write.
+        self._legacy_ledger({"A" * 32: 100, "B" * 32: 101, "C" * 32: 102})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "First", "body one", pk=100)
+        cli.add(self._local_date("B" * 32), "Second", "body two", pk=101)
+        cli.add(self._local_date("C" * 32), "Third", "body three", pk=102)
+        cli.store[-1]["epoch"] += 900
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
     def test_legacy_ledger_survives_a_timezone_change(self):
         # Imported in one zone (the entry landed 8h off today's wall clock),
         # verified in another: still the same write.

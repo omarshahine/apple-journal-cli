@@ -179,15 +179,21 @@ def verify_legacy(args, state, state_path, entries):
     listed = _destination_rows(args.cli, args.target_db)
     rows = {r["id"]: r for r in listed}
     by_uuid = {e["uuid"]: e for e in entries}
-    bad, checked = [], 0
-    for uuid, pk in state["done"].items():
-        if type(pk) is not int:
-            continue                         # older "True" marks carry no id
-        checked += 1
-        e, row = by_uuid.get(uuid), rows.get(pk)
-        # Same instant (allowing a time-zone change) AND the same words: a
-        # rehearsal id that lands on some other entry fails one or the other.
-        if (e is None or row is None or not _same_write(row["epoch"], e)
+    # One import ran in one zone, so every genuine mapping is shifted by the
+    # same (mode, offset): 0 if the zone never changed. Find that shift from
+    # the mappings whose words match, then hold each mapping to it. A stray
+    # entry a quarter hour off cannot share the ledger's shift.
+    mapped = [(uuid, pk, by_uuid.get(uuid), rows.get(pk))
+              for uuid, pk in state["done"].items() if type(pk) is int]
+    votes = collections.Counter()
+    for _, _, e, row in mapped:
+        if e is not None and row is not None and _same_content(row, e):
+            votes.update(_write_offsets(row["epoch"], e))
+    shift = (max(votes.items(), key=lambda kv: (kv[1], kv[0][1] == 0))[0]
+             if votes else None)
+    bad, checked = [], len(mapped)
+    for uuid, pk, e, row in mapped:
+        if (e is None or row is None or shift not in _write_offsets(row["epoch"], e)
                 or not _same_content(row, e)):
             bad.append((uuid, pk))
     if bad:
@@ -212,7 +218,7 @@ def verify_legacy(args, state, state_path, entries):
             continue
         e = by_uuid.get(uuid)
         hits = [r for r in listed if e is not None and r["id"] not in claimed
-                and _same_write(r["epoch"], e) and _same_content(r, e)]
+                and shift in _write_offsets(r["epoch"], e) and _same_content(r, e)]
         if len(hits) == 1:
             state["done"][uuid] = hits[0]["id"]
             claimed.add(hits[0]["id"])
@@ -224,24 +230,23 @@ def verify_legacy(args, state, state_path, entries):
         save_state(state_path, state)        # now tagged: verified once
 
 
-def _same_write(epoch, e):
-    """Whether a destination instant is the one this Day One entry was written at.
+def _write_offsets(epoch, e):
+    """{(mode, seconds)} shifts that make this instant the entry's --date.
 
-    The import read --date in the Mac's zone at the time, which may not be
-    today's. A time-zone change moves the instant by a whole number of
-    quarter hours within +/-14h; an unrelated entry essentially never lines up
-    to the second that way.
+    mode is the wall clock the import used ("local" or "utc"); seconds is
+    the time-zone change since, a whole number of quarter hours within +/-14h.
     """
+    out = set()
     if epoch is None:
-        return False
-    for stamp in (e.get("local"), e.get("utc")):
-        want = _wall_epoch(stamp)
+        return out
+    for mode in ("local", "utc"):
+        want = _wall_epoch(e.get(mode))
         if want is None:
             continue
         diff = epoch - want
         if abs(diff) <= 14 * 3600 and diff % 900 == 0:
-            return True
-    return False
+            out.add((mode, diff))
+    return out
 
 
 def save_state(path, state):
@@ -401,7 +406,13 @@ def _field_matches(dest, forms):
         return True                            # nothing to compare in this field
     digits = not any(_norm(f) for f in forms)  # e.g. a title that is just "2024"
     have = _norm(dest, digits)
-    return any(_norm(f, digits)[:40] in have for f in forms if _norm(f, digits))
+    # Equal, or the same opening AND closing 40 letters: a shared introduction
+    # with a different ending is a different entry.
+    for f in forms:
+        want = _norm(f, digits)
+        if want and (want == have or (want[:40] in have and want[-40:] in have)):
+            return True
+    return False
 
 
 def _same_content(row, e):
