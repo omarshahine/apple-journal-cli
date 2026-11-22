@@ -540,6 +540,27 @@ class ImportTests(Tmp):
         self.assertEqual(done["B" * 32], 101)
         self.assertEqual(type(done["C" * 32]), int)
 
+    def test_shared_title_with_different_body_is_not_the_same_entry(self):
+        self._legacy_ledger({"A" * 32: 42})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "First", "bread and coffee", pk=42)
+        cli.store[-1]["epoch"] += 900
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
+    def test_renumbered_list_still_matches(self):
+        # Journal renders "7. Walked home" as a list item numbered from 1.
+        db = self.p("list.sqlite")
+        make_dayone(db, [(1, "D" * 32, 1700000000,
+                          "D" * 32 + "\n7. Walked home\n8. Cooked dinner")])
+        with dayone.connect(db) as con:
+            e = dayone.read_entries(con, dayone.resolve_journal(con, "Travel")["pk"], {})[0]
+        self.assertIsNone(e["title"])
+        row = {"title": "", "text": "1. Walked home\n2. Cooked dinner"}
+        self.assertTrue(di._same_content(row, e))
+        self.assertFalse(di._same_content({"title": "", "text": "1. Slept in"}, e))
+
     def test_legacy_ledger_survives_a_timezone_change(self):
         # Imported in one zone (the entry landed 8h off today's wall clock),
         # verified in another: still the same write.

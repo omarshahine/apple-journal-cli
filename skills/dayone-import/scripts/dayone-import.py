@@ -380,27 +380,45 @@ def _destination_rows(cli, target_db):
             % (r.stderr or r.stdout).strip())
     return [{"id": x["id"], "epoch": _wall_epoch(x.get("date")),
              "fp": _fingerprint(x.get("title"), x.get("text")),
-             "content": _norm((x.get("title") or "") + (x.get("text") or ""))}
+             "title": x.get("title") or "", "text": x.get("text") or ""}
             for x in json.loads(r.stdout)]
 
 
-def _norm(s):
-    """Letters and digits only, lowercased: survives Markdown vs rendered text."""
-    return re.sub(r"[\W_]+", "", s or "").lower()
+def _norm(s, digits=False):
+    """Letters (optionally digits) only, lowercased.
+
+    Survives raw Markdown vs Journal's rendering, which drops syntax and
+    renumbers lists ("7. Walked" is saved as a list item numbered from 1), so
+    digits are left out unless a field has no letters at all.
+    """
+    return re.sub(r"[\W_]+" if digits else r"[\W_\d]+", "", s or "").lower()
+
+
+def _field_matches(dest, forms):
+    """Whether a destination field carries one of these source forms."""
+    forms = [f for f in forms if f]
+    if not forms:
+        return True                            # nothing to compare in this field
+    digits = not any(_norm(f) for f in forms)  # e.g. a title that is just "2024"
+    have = _norm(dest, digits)
+    return any(_norm(f, digits)[:40] in have for f in forms if _norm(f, digits))
 
 
 def _same_content(row, e):
-    """Whether a destination entry carries this Day One entry's words.
+    """Whether a destination entry is this Day One entry by its words.
 
-    Early imports wrote raw Markdown and later ones rendered it, so compare
-    letters and digits only, against both forms, by the opening 40 of each
-    field. An entry with no words matches only an entry with none.
+    Title against title and body against body, each in raw Markdown or
+    flattened form (early imports wrote Markdown through, later ones rendered
+    it). Every field the source has must match: a shared title alone does not
+    make two entries the same. An entry with no words matches only one with
+    none.
     """
-    probes = [_norm(e.get(k))[:40] for k in ("title", "title_md", "body", "body_md")]
-    probes = [p for p in probes if p]
-    if not probes:
-        return not row["content"]
-    return any(p in row["content"] for p in probes)
+    title_forms = [e.get("title"), e.get("title_md")]
+    body_forms = [e.get("body"), e.get("body_md")]
+    if not any(_norm(f, True) for f in title_forms + body_forms):
+        return not _norm(row["title"] + row["text"], True)
+    return (_field_matches(row["title"], title_forms)
+            and _field_matches(row["text"], body_forms))
 
 
 def _landed(info, rows, claimed):
