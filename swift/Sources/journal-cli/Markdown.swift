@@ -28,11 +28,29 @@ private func rx(_ p: String) -> NSRegularExpression {
 
 private let HEADING = rx("^[ \\t]{0,3}(#{1,6})[ \\t]+(.*)$")
 private let RULE = rx("^[ \\t]*(?:-{3,}|\\*{3,}|_{3,})[ \\t]*$")
-// An opening fence is optional indentation, three or more backticks, then an
-// optional info string. Only a run at least as long, with nothing after it,
-// closes the block, so "```literal" inside a block stays content.
-private let FENCE_OPEN = rx("^[ \\t]*(`{3,})[^`]*$")
-private let FENCE_CLOSE = rx("^[ \\t]*(`{3,})[ \\t]*$")
+// An opening fence is optional indentation, three or more backticks or
+// tildes, then an optional info string (a backtick fence's may not contain a
+// backtick). Only a bare run of the same character, at least as long, closes
+// the block, so "```literal" inside a block stays content and "~~~" does not
+// close a backtick block.
+private let FENCE_OPEN = rx("^[ \\t]*(`{3,}|~{3,})(.*)$")
+private let FENCE_CLOSE = rx("^[ \\t]*(`{3,}|~{3,})[ \\t]*$")
+// Image syntax is outside this subset and must survive as written: hidden
+// whole before the emphasis passes, so "/_full_/" in its url stays intact.
+private let IMAGE = rx("!\\[[^\\]]*\\]\\([^)\\s]+(?:\\s+\"[^\"]*\")?\\)")
+
+/// The fence run that opens a block on this line, or nil.
+private func fenceOpen(_ line: String) -> String? {
+    guard let run = capture(line, FENCE_OPEN, 1) else { return nil }
+    if run.hasPrefix("`"), (capture(line, FENCE_OPEN, 2) ?? "").contains("`") { return nil }
+    return run
+}
+
+/// Whether this line closes a block opened by `run`.
+private func fenceCloses(_ line: String, _ run: String) -> Bool {
+    guard let close = capture(line, FENCE_CLOSE, 1) else { return false }
+    return close.first == run.first && close.count >= run.count
+}
 private let BULLET = rx("^[ \\t]{0,3}[-*+][ \\t]+(.*)$")
 private let ORDERED = rx("^[ \\t]{0,3}[0-9]{1,9}[.)][ \\t]+(.*)$")
 private let QUOTE = rx("^[ \\t]{0,3}>[ \\t]?(.*)$")
@@ -54,8 +72,10 @@ private let EMPH = rx("(?<![\\w*_])([*_])(?=\\S)([^*_]+?)(?<=\\S)\\1(?![\\w*_])"
 // The C0 controls U+0001...U+0008 are hidden the same way, unconditionally:
 // they are this file's own emphasis and link markers, and a literal one in
 // the input would otherwise end (or start) formatting early.
-private let CONTROLS: [Character] = (1...8).map { Character(Unicode.Scalar(UInt8($0))) }
-private let ESCAPABLE = Array("\\`*_{}[]()#+-.!>~|") + CONTROLS
+// Scalars, not Characters: "*" followed by a combining accent is one
+// Character, and comparing whole graphemes would miss the escaped "*".
+private let CONTROLS: [Unicode.Scalar] = (1...8).map { Unicode.Scalar(UInt8($0)) }
+private let ESCAPABLE: [Unicode.Scalar] = Array("\\`*_{}[]()#+-.!>~|".unicodeScalars) + CONTROLS
 
 /// Pick a private-use window this text does not already use, so a literal
 /// private-use character in someone's entry is never mistaken for our own
@@ -82,83 +102,86 @@ private func escapeBase(for s: String) -> UInt32 {
 }
 
 // One pass over the line, so precedence is explicit: a backslash escape makes
-// the next character inert, a backtick opens a code span whose contents are
+// the next scalar inert, a backtick opens a code span whose contents are
 // taken verbatim (escapes included), and both are hidden in the private-use
-// range where the emphasis regexes cannot see them.
+// range where the emphasis regexes cannot see them. Everything works on
+// Unicode scalars: an escaped "*" followed by a combining mark is one
+// Character, and must still read as an escape (the mark stays after it).
 private func protectInline(_ s: String, _ base: UInt32) -> String {
-    var out = ""
+    var out = String.UnicodeScalarView()
     var escaping = false
     var inCode = false
-    var code = ""
-    func hide(_ ch: Character) {
-        if let i = ESCAPABLE.firstIndex(of: ch),
+    var code = String.UnicodeScalarView()
+    func hide(_ u: Unicode.Scalar) {
+        if let i = ESCAPABLE.firstIndex(of: u),
            let scalar = Unicode.Scalar(base + UInt32(i)) {
-            out.unicodeScalars.append(scalar)
+            out.append(scalar)
         } else {
             // Markdown only escapes its own punctuation; a backslash before
             // anything else is literal text, as in a Windows path.
             out.append("\\")
-            out.append(ch)
+            out.append(u)
         }
     }
-    for ch in s {
+    for u in s.unicodeScalars {
         if inCode {
-            if ch == "`" {
-                out.append(hideAll("`" + code + "`", base))
+            if u == "`" {
+                out.append(contentsOf: hideAll("`" + String(code) + "`", base).unicodeScalars)
                 inCode = false
-                code = ""
+                code = String.UnicodeScalarView()
             } else {
-                code.append(ch)
+                code.append(u)
             }
             continue
         }
         if escaping {
-            hide(ch)
+            hide(u)
             escaping = false
-        } else if ch == "\\" {
+        } else if u == "\\" {
             escaping = true
-        } else if ch == "`" {
+        } else if u == "`" {
             inCode = true
-            code = ""
-        } else if CONTROLS.contains(ch) {
-            hide(ch)
+            code = String.UnicodeScalarView()
+        } else if CONTROLS.contains(u) {
+            hide(u)
         } else {
-            out.append(ch)
+            out.append(u)
         }
     }
     if inCode {                            // unterminated span stays literal
-        out.append(hideAll("`" + code, base))
+        out.append(contentsOf: hideAll("`" + String(code), base).unicodeScalars)
     }
     if escaping { out.append("\\") }        // a trailing lone backslash
-    return out
+    return String(out)
 }
 
-/// Map every escapable character in a string onto the private-use range.
+/// Map every escapable scalar in a string onto the private-use range.
 private func hideAll(_ s: String, _ base: UInt32) -> String {
-    var out = ""
-    for ch in s {
-        if let i = ESCAPABLE.firstIndex(of: ch),
+    var out = String.UnicodeScalarView()
+    for u in s.unicodeScalars {
+        if let i = ESCAPABLE.firstIndex(of: u),
            let scalar = Unicode.Scalar(base + UInt32(i)) {
-            out.unicodeScalars.append(scalar)
+            out.append(scalar)
         } else {
-            out.append(ch)
+            out.append(u)
         }
     }
-    return out
+    return String(out)
 }
 
+/// Undo hideAll/protectInline scalar by scalar, so a sentinel that a combining
+/// mark joined into one grapheme is still restored.
 private func restoreEscapes(_ s: String, _ base: UInt32) -> String {
-    var out = ""
-    for ch in s {
-        let u = ch.unicodeScalars
-        if u.count == 1, let v = u.first?.value,
-           v >= base, v < base + UInt32(ESCAPABLE.count) {
+    var out = String.UnicodeScalarView()
+    for u in s.unicodeScalars {
+        let v = u.value
+        if v >= base, v < base + UInt32(ESCAPABLE.count) {
             out.append(ESCAPABLE[Int(v - base)])
         } else {
-            out.append(ch)
+            out.append(u)
         }
     }
-    return out
+    return String(out)
 }
 
 private func sub(_ s: String, _ re: NSRegularExpression, _ tmpl: String) -> String {
@@ -195,6 +218,11 @@ private enum LineKind: Equatable {
 private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
     let base = escapeBase(for: line)
     var s = protectInline(line, base)
+    // Hide whole image constructs before links and emphasis see them.
+    for m in IMAGE.matches(in: s, range: NSRange(s.startIndex..., in: s)).reversed() {
+        guard let r = Range(m.range, in: s) else { continue }
+        s.replaceSubrange(r, with: hideAll(String(s[r]), base))
+    }
 
     // "[text](url)" -> "text (url)", or just the url when the label adds nothing.
     // The url goes in as an opaque marker so the emphasis passes below cannot
@@ -290,22 +318,22 @@ private let quoteStyle: NSParagraphStyle = {
 func markdownToAttributed(_ md: String) -> NSAttributedString {
     var kinds: [LineKind] = []
     var contents: [[Span]] = []
-    var fenceLen = 0                       // 0 = not in a fenced block
+    var fence = ""                         // the opening run; "" = not in a block
 
     // CRLF must not split twice: .newlines treats \r and \n as separate
     // delimiters, which would insert a blank line after every source line.
     let normalized = md.replacingOccurrences(of: "\r\n", with: "\n")
                        .replacingOccurrences(of: "\r", with: "\n")
     for raw in normalized.components(separatedBy: "\n") {
-        if fenceLen > 0 {
-            if let run = capture(raw, FENCE_CLOSE, 1), run.count >= fenceLen {
-                fenceLen = 0; continue
+        if !fence.isEmpty {
+            if fenceCloses(raw, fence) {
+                fence = ""; continue
             }
             kinds.append(.code)
             contents.append([Span(text: raw)])
             continue
         }
-        if let run = capture(raw, FENCE_OPEN, 1) { fenceLen = run.count; continue }
+        if let run = fenceOpen(raw) { fence = run; continue }
         if hits(raw, RULE) { continue }            // a rule has no text form
 
         if let text = capture(raw, HEADING, 2) {

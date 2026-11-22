@@ -55,6 +55,9 @@ All Media**, wait for it to finish, then re-run.
 If you have a markdown export of that journal, pass `--export DIR` and its
 `photos/` folder is searched first. Exports often contain bytes the app has
 since evicted, so an export plus the store is the strongest combination.
+With `--db` pointing at a copied store, its own `DayOnePhotos/`,
+`DayOneVideos/` and `DayOneAudios/` beside it are searched next, before the
+installed app's.
 
 Two kinds of loss are permanent and `plan` names them:
 - **"no attachment row"** — the entry text references a moment Day One itself
@@ -126,7 +129,7 @@ other devices. `sync-journals` is a read-only audit and instruction command.
 - **Text is kept as written.** Only Day One's own attachment references
   (`![](dayone-moment:...)`) are taken out of the text. Other image syntax,
   such as an external URL, stays, and so does anything inside a fenced code
-  block or escaped with a backslash. Line 1 becomes the title unless it opens
+  block (backtick or tilde fences) or escaped with a backslash. Line 1 becomes the title unless it opens
   a code block, or is the entry's own UUID (Day One's "no title" placeholder);
   any other hex string is a real title.
 - **Resumable.** Progress is kept in an import ledger keyed by Day One UUID.
@@ -138,7 +141,9 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   created during that run (its id is above the highest id when the run
   started), is not already claimed by another Day One entry, has the same
   instant (compared as an epoch, so a timezone change between runs does not
-  matter), and has the same rendered title and text. Found, it is recorded;
+  matter), and has the same rendered title and text. Destination dates are read in UTC,
+  and an ambiguous `--date` in the repeated hour at the end of daylight saving
+  matches either instant. Found, it is recorded;
   absent, it is written again (or, after a nonzero exit, recorded as failed);
   ambiguous, the import stops and names the candidates.
   The ledger is also checked before the first write, so an unwritable ledger
@@ -161,7 +166,16 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   entry id are looked up by that instant, with words breaking ties: found,
   they get their id; not found, the entry is imported again. If it all
   matches, the ledger is tagged and used. If not, the
-  command stops and names the mismatch; move the ledger aside. The
+  command stops and names the mismatch; move the ledger aside.
+
+  A ledger also records **which Journal store** it belongs to (the store's own
+  UUID: two Macs with the same paths still have different stores) and each
+  mapping's Journal entry UUID, which an entry keeps wherever it syncs. On a
+  store other than the one that wrote it (a ledger restored on another Mac),
+  every mapping is looked up by its entry UUID and rewritten to this store's
+  ids; if any cannot be found, the command stops rather than skip entries or
+  repair the wrong ones. A ledger tagged before stores were recorded is
+  verified once, like an untagged one, then tagged. The
   destination is resolved the way journal-cli resolves it: `--target-db`,
   else `$JOURNAL_DB`, else the real store, so a `$JOURNAL_DB` sandbox gets a
   sandbox ledger too. A
@@ -180,7 +194,9 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   key (the filename); a `--state` ledger elsewhere is keyed by its journal,
   Day One store and destination, so two `--state` files with one basename
   never share a key. Publishing never overwrites a remote ledger that records
-  a different import, and a machine never restores one; it warns instead.
+  a different import, and a machine never restores one; it warns instead. If
+  the worker cannot say whether a key exists (a failed lookup is not "not
+  there"), publishing skips this run and says so.
 - **`--prune-backups`** is close to required for big journals. `journal-cli`
   snapshots the whole store before *every* live write; over a few thousand
   entries that is tens of GB of near-identical copies. This retires them to
@@ -206,7 +222,7 @@ renders the subset Journal actually supports:
 | `- item` / `1. item` | real bulleted and numbered lists |
 | `> quote` | an indented paragraph |
 | `[text](url)` | `text (url)` |
-| `---` rules, ``` fences | removed |
+| `---` rules, ``` and ~~~ fences | removed |
 | `\\.` `\\-` escaping | unescaped |
 
 Escaping is why list detection runs *before* unescaping: Day One writes

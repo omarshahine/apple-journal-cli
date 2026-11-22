@@ -191,8 +191,29 @@ _HEADING = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
 _RULE = re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$")
 _BOLD_ITALIC = re.compile(r"(\*{1,3}|_{1,3})(\S(?:.*?\S)?)\1", re.S)
 _LINK = re.compile(r'\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
-_FENCE_OPEN = re.compile(r"[ \t]*(`{3,})[^`\n]*")
-_FENCE_CLOSE = re.compile(r"[ \t]*(`{3,})[ \t]*")
+_FENCE_OPEN = re.compile(r"[ \t]*(`{3,}|~{3,})([^\n]*)")
+_FENCE_CLOSE = re.compile(r"[ \t]*(`{3,}|~{3,})[ \t]*")
+
+
+def _fence_open(line):
+    """The run ("```", "~~~~", ...) that opens a fenced block here, or None.
+
+    Backticks and tildes both fence code. A backtick fence's info string may
+    not contain a backtick (that line is inline code, not a fence).
+    """
+    m = _FENCE_OPEN.fullmatch(line)
+    if not m:
+        return None
+    if m.group(1)[0] == "`" and "`" in m.group(2):
+        return None
+    return m.group(1)
+
+
+def _fence_closes(line, run):
+    """Whether this line closes a block opened by `run`: a bare run of the
+    same character, at least as long."""
+    m = _FENCE_CLOSE.fullmatch(line)
+    return bool(m) and m.group(1)[0] == run[0] and len(m.group(1)) >= len(run)
 _TITLE_HEADING = re.compile(r"^#{1,6}[ \t]+")
 
 
@@ -229,17 +250,16 @@ def _split_moments(md):
     a fenced code block, whose content is literal. Blank-line runs left by the
     removal are collapsed in prose only; code keeps its blank lines.
     """
-    out, refs, fence, blanks = [], [], 0, 0
+    out, refs, fence, blanks = [], [], None, 0
     for line in (md or "").split("\n"):
         if fence:
-            m = _FENCE_CLOSE.fullmatch(line)
-            if m and len(m.group(1)) >= fence:
-                fence = 0
+            if _fence_closes(line, fence):
+                fence = None
             out.append(line)
             continue
-        m = _FENCE_OPEN.fullmatch(line)
-        if m:
-            fence = len(m.group(1))
+        run = _fence_open(line)
+        if run:
+            fence = run
             blanks = 0
             out.append(line)
             continue
@@ -277,19 +297,18 @@ def markdown_to_text(md):
     # string) and closes only on a bare run at least as long, so a shorter
     # "```" inside a "````" block is content -- the same rule as journal-cli's
     # renderer.
-    chunks, cur, fence = [], [], 0             # fence: opening run, 0 = prose
+    chunks, cur, fence = [], [], None          # fence: opening run, None = prose
     for line in md.split("\n"):
         if fence:
-            m = _FENCE_CLOSE.fullmatch(line)
-            if m and len(m.group(1)) >= fence:
+            if _fence_closes(line, fence):
                 chunks.append((True, "\n".join(cur)))
-                cur, fence = [], 0
+                cur, fence = [], None
                 continue
         else:
-            m = _FENCE_OPEN.fullmatch(line)
-            if m:
+            run = _fence_open(line)
+            if run:
                 chunks.append((False, "\n".join(cur)))
-                cur, fence = [], len(m.group(1))
+                cur, fence = [], run
                 continue
         cur.append(line)
     chunks.append((bool(fence), "\n".join(cur)))
@@ -340,15 +359,19 @@ def _local(utc, tz):
     return utc.astimezone(z) if z else utc
 
 
-def media_index(extra_dirs=()):
+def media_index(extra_dirs=(), source_db=None):
     """MD5 -> file path, across Day One's own media dirs and any extras.
 
     Day One frequently keeps media cloud-only (thumbnails locally, originals
     on demand), so a markdown export's photos/ folder is often the *better*
-    source of bytes. Extra dirs are searched first for that reason.
+    source of bytes. Extra dirs are searched first for that reason. Then the
+    media folders beside the store being read (a copied store keeps its
+    DayOnePhotos/ next to it), then the installed app's own.
     """
     index = {}
-    dirs = [d for d in extra_dirs] + [os.path.join(DAYONE_DIR, d)
+    homes = [os.path.dirname(os.path.abspath(os.path.expanduser(source_db)))] if source_db else []
+    homes.append(DAYONE_DIR)
+    dirs = [d for d in extra_dirs] + [os.path.join(h, d) for h in dict.fromkeys(homes)
                                       for d in MEDIA_DIRS]
     for d in dirs:
         if not d or not os.path.isdir(d):
@@ -420,7 +443,7 @@ def read_entries(con, journal_pk, media=None):
         lines = prose.split("\n")
         title, body = None, prose
         own = (e["ZUUID"] or "").replace("-", "").upper()
-        if lines and lines[0].strip() and not _FENCE_OPEN.fullmatch(lines[0]):
+        if lines and lines[0].strip() and not _fence_open(lines[0]):
             # Only a real ATX heading marker ("# ", up to six hashes, then
             # whitespace) is syntax; "#travel" is a literal title. A body that
             # opens with a code fence has no title: promoting the fence line
