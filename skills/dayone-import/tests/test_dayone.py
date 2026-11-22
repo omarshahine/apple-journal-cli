@@ -608,6 +608,20 @@ class ImportTests(Tmp):
         stray = dict(rows[1], epoch=rows[1]["epoch"] + 900)
         self.assertFalse(any(di._wrote_at(stray["epoch"], e2, z) for z in zones))
 
+    def test_entry_edited_after_the_import_still_verifies(self):
+        # Rewritten in Journal since: different words, same exact instant.
+        path = self._legacy_ledger({"A" * 32: 100})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "Jason Moore", "a quote, restructured", pk=100)
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 2)
+        with open(path) as fh:
+            self.assertEqual(json.load(fh)["done"]["A" * 32], 100)
+
+    def test_a_rule_only_body_is_no_text_to_compare(self):
+        e = {"title": "Post office", "title_md": "Post office", "body": "", "body_md": "---"}
+        self.assertTrue(di._same_content({"title": "Post office", "text": ""}, e))
+
     def test_legacy_ledger_survives_a_timezone_change(self):
         # Imported in one zone, verified in another: still the same write.
         path = self._legacy_ledger({"A" * 32: 100})

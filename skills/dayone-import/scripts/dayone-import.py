@@ -180,19 +180,23 @@ def verify_legacy(args, state, state_path, entries):
     rows = {r["id"]: r for r in listed}
     by_uuid = {e["uuid"]: e for e in entries}
     # The old import read each --date in one time zone (and one --time-mode).
-    # Find the (mode, zone) pairs under which the mappings whose words match
-    # land exactly on their instants -- that absorbs daylight saving and any
-    # zone change since -- keep every pair that explains the most of them, and
-    # refuse the ledger if any mapping is left unexplained. A stray entry a
+    # Find the (mode, zone) pairs under which these mappings land exactly, to
+    # the second, on their destination instants -- that absorbs daylight
+    # saving and any zone change since -- keep every pair that explains the
+    # most of them, and refuse the ledger if any mapping is left unexplained.
+    # A rehearsal's ids point at unrelated entries, and a stray entry a
     # quarter hour off cannot fit the same zone as the rest.
+    #
+    # Content is deliberately not required here: people edit entries after an
+    # import (checked against real ledgers: rewritten endings, quotes split
+    # into title and author), and that must not make a genuine ledger unusable.
     mapped = [(uuid, pk, by_uuid.get(uuid), rows.get(pk))
               for uuid, pk in state["done"].items() if type(pk) is int]
-    good = [(e, row) for _, _, e, row in mapped
-            if e is not None and row is not None and _same_content(row, e)]
-    zones = _import_zones(good)
+    zones = _import_zones([(e, row) for _, _, e, row in mapped
+                           if e is not None and row is not None])
     bad, checked = [], len(mapped)
     for uuid, pk, e, row in mapped:
-        if (e is None or row is None or not _same_content(row, e)
+        if (e is None or row is None
                 or not any(_wrote_at(row["epoch"], e, z) for z in zones)):
             bad.append((uuid, pk))
     if bad:
@@ -217,10 +221,12 @@ def verify_legacy(args, state, state_path, entries):
             continue
         e = by_uuid.get(uuid)
         # Any equally good (mode, zone) may be the right one; only a mark that
-        # none of them can place is dropped.
+        # none of them can place is dropped. Several entries at that second are
+        # told apart by their words.
         hits = [r for r in listed if e is not None and r["id"] not in claimed
-                and _same_content(r, e)
                 and any(_wrote_at(r["epoch"], e, z) for z in zones)]
+        if len(hits) > 1:
+            hits = [r for r in hits if _same_content(r, e)]
         if len(hits) == 1:
             state["done"][uuid] = hits[0]["id"]
             claimed.add(hits[0]["id"])
@@ -449,7 +455,8 @@ def _norm(s, digits=False):
 
 def _field_matches(dest, forms):
     """Whether a destination field carries one of these source forms."""
-    forms = [f for f in forms if f]
+    # A form with no letters or digits ("---", a lone emoji) says nothing.
+    forms = [f for f in forms if _norm(f, True)]
     if not forms:
         return True                            # nothing to compare in this field
     digits = not any(_norm(f) for f in forms)  # e.g. a title that is just "2024"
