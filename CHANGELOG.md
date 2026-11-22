@@ -1,8 +1,28 @@
 # Changelog
 
-## Unreleased
+## 1.4.8
+
+### Fixed: second review pass, dayone-import
+
+([#28](https://github.com/omarshahine/apple-journal-cli/pull/28))
+
+- **External image syntax is kept.** Only real Day One attachment references
+  (`dayone-moment:` links) are stripped; other `![...](...)` images, ones
+  inside fenced code, and escaped ones stay in the text.
+- **One time zone must explain a whole legacy ledger.** Each mapping used to
+  be accepted under any of several tied zones; now a single (mode, zone) has
+  to fit them all, or the ledger is refused.
+- **Only the entry's own UUID marks an untitled entry.** Any other 32-hex
+  first line is a real title.
+- **Fenced code survives preprocessing:** a body that opens with a fence keeps
+  it, and its blank lines stay. `fix-text` clears a fence an older version
+  promoted to the title.
+- **Remote ledger copies are keyed by import**, not by local filename, so two
+  imports' `--state` files never overwrite each other's published copy.
 
 ### Fixed: second review pass, CLI
+
+([#27](https://github.com/omarshahine/apple-journal-cli/pull/27))
 
 - **A hard link to the real store is the real store.** The live-store check
   compared paths, so `--db` pointed at a hard link skipped `--live`, the risk
