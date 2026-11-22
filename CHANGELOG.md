@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Markdown export** escapes `&` in attachment links and labels, so a path
+  containing `&copy;` can't render as ©, and percent-encodes line breaks.
+- **dayone-import** accepts a GPS direction only as the EXIF letter-plus-NUL,
+  within the data the photo actually has.
+
 ## 1.5.0
 
 ### Fixed: third review pass

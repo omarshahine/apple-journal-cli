@@ -823,7 +823,7 @@ ok "refused read leaves no snapshot" "$(find "$TDIR" -mindepth 1 -maxdepth 1 -na
 # with spaces and parentheses stay valid link destinations.
 KOUT=$("$CLI" --db "$DB" write --link https://example.org/page --link-title "Example (page)" 2>&1)
 KPK=$(echo "$KOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
-SBX=$(mktemp -d "/tmp/journal sandbox (x).XXXXXX")
+SBX=$(mktemp -d "/tmp/journal sandbox &copy; (x).XXXXXX")
 DBX=$("$CLI" sandbox --dir "$SBX" --from "$DB")
 XOUT=$("$CLI" --db "$DBX" write --body "Spaced path." --media "$IMG" 2>&1)
 XPK=$(echo "$XOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
@@ -839,6 +839,11 @@ for f in glob.glob(sys.argv[1]+"/*-"+sys.argv[2]+".md")+glob.glob(sys.argv[1]+"/
     for m in re.finditer(r"!\[[^\]]*\]\(<((?:[^<>\\]|\\.)*)>\)", open(f).read()):
         hits.append(os.path.exists(re.sub(r"\\(.)", r"\1", m.group(1))))
 print(bool(hits) and all(hits))' "$EXX" "$XPK")" "True"
+ok "& in a path cannot start an entity" "$(python3 -c '
+import glob,re,sys
+f=(glob.glob(sys.argv[1]+"/*-"+sys.argv[2]+".md")+glob.glob(sys.argv[1]+"/*-"+sys.argv[2]+"-*.md"))[0]
+links=[l for l in open(f) if l.startswith("![")]
+print(bool(links) and all("\\&copy;" in l and not re.search(r"(?<!\\)&", l) for l in links))' "$EXX" "$XPK")" "True"
 trash "$SBX" 2>/dev/null
 
 echo "T8 integrity"

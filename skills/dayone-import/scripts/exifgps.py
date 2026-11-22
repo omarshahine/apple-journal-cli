@@ -46,7 +46,12 @@ def _ref(tiff, entry, allowed):
     and "" is "in" any string, which would read damage as north or east.
     """
     typ, cnt, val = entry
-    if typ != 2 or cnt < 1 or val >= len(tiff):
+    # EXIF gives a GPS ref exactly the letter and a NUL (count 2; 1 is a
+    # common truncation). Anything else, or a count running past the data,
+    # is damage, not a direction.
+    if typ != 2 or cnt not in (1, 2) or val + cnt > len(tiff):
+        return None
+    if cnt == 2 and tiff[val + 1:val + 2] != b"\x00":
         return None
     c = tiff[val:val + 1]
     return c.decode("ascii") if len(c) == 1 and c in [x.encode() for x in allowed] else None

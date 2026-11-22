@@ -677,11 +677,13 @@ def _export_md(a, ents):
 
 def md_label(s):
     """Markdown link text with brackets and backslashes escaped."""
-    return "".join("\\" + ch if ch in "\\[]" else ch for ch in s)
+    return "".join("\\" + ch if ch in "\\[]&" else ch for ch in s)
 
 def md_dest(s):
     """Angle-bracket Markdown destination: survives spaces and parentheses."""
-    return "<" + "".join("\\" + ch if ch in "\\<>" else ch for ch in s) + ">"
+    enc = {"\n": "%0A", "\r": "%0D"}   # line breaks can't appear in a destination
+    return "<" + "".join(enc.get(ch) or ("\\" + ch if ch in "\\<>&" else ch)
+                         for ch in s) + ">"
 
 def md_asset_text(assets):
     """Readable text carried by non-file assets: links, transcripts, drawings."""

@@ -156,7 +156,8 @@ func cmdExport(_ a: Args) {
 /// Markdown link text with its brackets and backslashes escaped.
 func mdLabel(_ s: String) -> String {
     var out = ""
-    for ch in s { if "\\[]".contains(ch) { out.append("\\") }; out.append(ch) }
+    // "&" too, or "&copy;" in a file name renders as an entity.
+    for ch in s { if "\\[]&".contains(ch) { out.append("\\") }; out.append(ch) }
     return out
 }
 
@@ -164,7 +165,17 @@ func mdLabel(_ s: String) -> String {
 /// angle-bracket form, with "<", ">" and backslashes escaped.
 func mdDest(_ s: String) -> String {
     var out = "<"
-    for ch in s { if "\\<>".contains(ch) { out.append("\\") }; out.append(ch) }
+    for ch in s {
+        switch ch {
+        // A line break cannot appear in a destination at all; percent-encode it.
+        case "\n": out += "%0A"
+        case "\r": out += "%0D"
+        case "\r\n": out += "%0D%0A"
+        // "&" would start an entity: "&copy;" names a different path.
+        case "\\", "<", ">", "&": out.append("\\"); out.append(ch)
+        default: out.append(ch)
+        }
+    }
     return out + ">"
 }
 
