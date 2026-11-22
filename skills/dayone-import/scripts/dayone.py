@@ -31,7 +31,15 @@ MEDIA_DIRS = ("DayOnePhotos", "DayOneVideos", "DayOneAudios")
 # ![](dayone-moment:/audio/<uuid>); body order is the true display order.
 MOMENT_RE = re.compile(
     r"!\[\]\(dayone-moment:/*(?:audio/|video/)?([0-9A-Fa-f]{32})\)")
-IMAGE_RE = re.compile(r"!\[\]\([^)]*\)")
+# Real (not backslash-escaped) Day One reference syntax, any kind --
+# photo, audio, video, pdfAttachment, ... -- which is never text. Other image
+# syntax (an external URL, say) is content and stays in the text.
+# A "!" is escaped only by an odd run of backslashes ("\\!" is an escaped
+# backslash and a live "!"), so each pattern captures the even run in front
+# (group "lead") and keeps it when the reference is removed.
+_LEAD = r"(?<!\\)(?P<lead>(?:\\\\)*)"
+_MOMENT_LIVE_RE = re.compile(_LEAD + MOMENT_RE.pattern)
+_MOMENT_ANY_RE = re.compile(_LEAD + r"!\[\]\(dayone-moment:[^)\s]*\)")
 
 
 def die(msg):
@@ -203,6 +211,41 @@ def _flatten_prose(text):
     return _ESCAPED.sub(r"\1", out)
 
 
+def _split_moments(md):
+    """(prose, refs): the text without its Day One attachment references.
+
+    Only real references are taken out: not escaped ones, and nothing inside
+    a fenced code block, whose content is literal. Blank-line runs left by the
+    removal are collapsed in prose only; code keeps its blank lines.
+    """
+    out, refs, fence, blanks = [], [], 0, 0
+    for line in (md or "").split("\n"):
+        if fence:
+            m = _FENCE_CLOSE.fullmatch(line)
+            if m and len(m.group(1)) >= fence:
+                fence = 0
+            out.append(line)
+            continue
+        m = _FENCE_OPEN.fullmatch(line)
+        if m:
+            fence = len(m.group(1))
+            blanks = 0
+            out.append(line)
+            continue
+        refs.extend(m.group(2) for m in _MOMENT_LIVE_RE.finditer(line))
+        line = _MOMENT_ANY_RE.sub(lambda m: m.group("lead"), line)
+        # Same rule as before for prose: runs of empty lines collapse to one
+        # (a whitespace-only line is not empty, and stays).
+        if line == "":
+            blanks += 1
+            if blanks > 1:
+                continue
+        else:
+            blanks = 0
+        out.append(line)
+    return "\n".join(out).strip(), refs
+
+
 def markdown_to_text(md):
     """Flatten Day One markdown into what a plain-text reader should see.
 
@@ -306,7 +349,8 @@ def read_entries(con, journal_pk, media=None):
                 missing.append({"uuid": ref, "md5": a["ZMD5"],
                                 "reason": "media not downloaded"})
 
-        for ref in (m.upper() for m in MOMENT_RE.findall(md)):
+        prose, refs = _split_moments(md)
+        for ref in (m.upper() for m in refs):
             a = by_id.get(ref)
             if a is None:
                 # referenced in the text but the attachment row is gone --
@@ -326,17 +370,19 @@ def read_entries(con, journal_pk, media=None):
                 seen.add(i)
                 classify(i, a)
 
-        prose = IMAGE_RE.sub("", md)
-        prose = re.sub(r"\n{3,}", "\n\n", prose).strip()
         lines = prose.split("\n")
         title, body = None, prose
-        if lines and lines[0].strip():
+        own = (e["ZUUID"] or "").replace("-", "").upper()
+        if lines and lines[0].strip() and not _FENCE_OPEN.fullmatch(lines[0]):
             # Only a real ATX heading marker ("# ", up to six hashes, then
-            # whitespace) is syntax; "#travel" is a literal title.
+            # whitespace) is syntax; "#travel" is a literal title. A body that
+            # opens with a code fence has no title: promoting the fence line
+            # would strip the block's opener.
             first = _TITLE_HEADING.sub("", lines[0].strip(), count=1).strip()
             # Day One has no title field; the export promotes line 1. When an
-            # entry had no text at all, line 1 is just its own UUID.
-            if re.fullmatch(r"[0-9A-Fa-f]{32}", first):
+            # entry had no text at all, line 1 is just its own UUID -- that
+            # UUID, not any 32-hex string, which is a real title.
+            if own and first.replace("-", "").upper() == own:
                 body = "\n".join(lines[1:]).strip()
             else:
                 title, body = first, "\n".join(lines[1:]).strip()

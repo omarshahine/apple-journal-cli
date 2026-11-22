@@ -119,6 +119,12 @@ other devices. `sync-journals` is a read-only audit and instruction command.
 - **The staging journal must already exist** in Journal.app. Give it a name
   distinct from the final journal, for example `Day One - Photography`.
 - **Quit Journal.app** before a live run; `journal-cli` refuses while it runs.
+- **Text is kept as written.** Only Day One's own attachment references
+  (`![](dayone-moment:...)`) are taken out of the text. Other image syntax,
+  such as an external URL, stays, and so does anything inside a fenced code
+  block or escaped with a backslash. Line 1 becomes the title unless it opens
+  a code block, or is the entry's own UUID (Day One's "no title" placeholder);
+  any other hex string is a real title.
 - **Resumable.** Progress is kept in an import ledger keyed by Day One UUID.
   Each write is marked *pending* before journal-cli runs and recorded as done
   (written and fsynced) the moment it succeeds, so a re-run skips what landed.
@@ -144,7 +150,9 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   rehearsal wrote to the live filename, so an untagged ledger is checked
   first: every recorded entry must exist in the destination at the exact
   second it was written, all under one inferred import time zone (which
-  absorbs daylight saving and any zone change since). Words are not required
+  absorbs daylight saving and any zone change since). That one zone has to
+  explain every recorded entry; mappings that only fit different zones are
+  refused, not accepted one zone at a time. Words are not required
   to match, since entries are often edited after an import. Old marks with no
   entry id are looked up by that instant, with words breaking ties: found,
   they get their id; not found, the entry is imported again. If it all
@@ -164,7 +172,11 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   published when the import finishes. Only live ledgers are published;
   rehearsal ledgers stay on this Mac. A machine with no local copy pulls it
   back automatically. If the worker is unreachable the import still runs and
-  says the local copy is the only one.
+  says the local copy is the only one. A default ledger keeps its original
+  key (the filename); a `--state` ledger elsewhere is keyed by its journal,
+  Day One store and destination, so two `--state` files with one basename
+  never share a key. Publishing never overwrites a remote ledger that records
+  a different import, and a machine never restores one; it warns instead.
 - **`--prune-backups`** is close to required for big journals. `journal-cli`
   snapshots the whole store before *every* live write; over a few thousand
   entries that is tens of GB of near-identical copies. This retires them to
