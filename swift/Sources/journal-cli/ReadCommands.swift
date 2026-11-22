@@ -91,18 +91,28 @@ func cmdSearch(_ a: Args) {
 func cmdExport(_ a: Args) {
     guard let dir = a.value("--dir") else { die("export needs --dir") }
     let format = a.value("--format") ?? "md"
-    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    do { try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true) }
+    catch { die("cannot create \(dir): \(error.localizedDescription)") }
+    // includeEmpty, then keep anything with words OR assets: a photo-only or
+    // location-only entry is still an entry, and export used to drop it.
     let payload: [(Entry, [[String: Any]])] = withSnapshot { db in
-        fetch(db).map { ($0, assetsFor(db, $0.id)) }
+        fetch(db, includeEmpty: true).compactMap { e in
+            let assets = assetsFor(db, e.id)
+            return (e.text.isEmpty && e.title.isEmpty && assets.isEmpty) ? nil : (e, assets)
+        }
     }
     if format == "json" {
         let arr = payload.map { (e, assets) -> [String: Any] in
             var j = e.json; j["assets"] = assets; return j
         }
         let p = dir + "/journal.json"
-        try! JSONSerialization.data(withJSONObject: arr,
-            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-            .write(to: URL(fileURLWithPath: p))
+        do {
+            try JSONSerialization.data(withJSONObject: arr,
+                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                .write(to: URL(fileURLWithPath: p))
+        } catch {
+            die("cannot write \(p): \(error.localizedDescription)")
+        }
         print("Wrote \(payload.count) entries to \(p)")
         return
     }
@@ -113,17 +123,15 @@ func cmdExport(_ a: Args) {
         let stamp = String((e.date ?? "").prefix(10))
         let name = "\(stamp)-\(e.id)\(slug.isEmpty ? "" : "-" + slug).md"
         var out = "---\ndate: \(e.date ?? "")\nid: \(e.id)\n"
-        if !e.title.isEmpty {
-            let t = try! JSONSerialization.data(withJSONObject: [e.title])
-            let ts = String(data: t, encoding: .utf8)!.dropFirst().dropLast()
-            out += "title: \(ts)\n"
-        }
+        if !e.title.isEmpty { out += "title: \(yamlString(e.title))\n" }
         if e.bookmarked { out += "bookmarked: true\n" }
         let places = assets.flatMap { ($0["places"] as? [[String: Any]]) ?? [] }
         if !places.isEmpty {
             out += "locations:\n"
             for p in places {
-                let nm = (p["name"] as? String).map { "\"\($0)\"" } ?? "null"
+                // JSON string syntax is valid YAML, and escapes quotes,
+                // backslashes and newlines the way the title already does.
+                let nm = (p["name"] as? String).map { yamlString($0) } ?? "null"
                 out += "  - name: \(nm)\n    lat: \(p["lat"] ?? "null")\n    lon: \(p["lon"] ?? "null")\n"
             }
         }
@@ -135,9 +143,16 @@ func cmdExport(_ a: Args) {
                 out += "![\(f["name"] as? String ?? "file")](\(f["path"] as? String ?? ""))\n"
             }
         }
-        try? out.write(toFile: dir + "/" + name, atomically: true, encoding: .utf8)
+        do { try out.write(toFile: dir + "/" + name, atomically: true, encoding: .utf8) }
+        catch { die("cannot write \(dir)/\(name): \(error.localizedDescription)") }
     }
     print("Wrote \(payload.count) entries to \(dir)")
+}
+
+/// A double-quoted YAML scalar (JSON string syntax is a subset of YAML's).
+private func yamlString(_ s: String) -> String {
+    let d = try! JSONSerialization.data(withJSONObject: [s], options: [.withoutEscapingSlashes])
+    return String(String(data: d, encoding: .utf8)!.dropFirst().dropLast())
 }
 
 func cmdStats(_ a: Args) {

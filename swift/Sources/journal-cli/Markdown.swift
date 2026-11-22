@@ -28,7 +28,11 @@ private func rx(_ p: String) -> NSRegularExpression {
 
 private let HEADING = rx("^[ \\t]{0,3}(#{1,6})[ \\t]+(.*)$")
 private let RULE = rx("^[ \\t]*(?:-{3,}|\\*{3,}|_{3,})[ \\t]*$")
-private let FENCE = rx("^[ \\t]*```")
+// An opening fence is optional indentation, three or more backticks, then an
+// optional info string. Only a run at least as long, with nothing after it,
+// closes the block, so "```literal" inside a block stays content.
+private let FENCE_OPEN = rx("^[ \\t]*(`{3,})[^`]*$")
+private let FENCE_CLOSE = rx("^[ \\t]*(`{3,})[ \\t]*$")
 private let BULLET = rx("^[ \\t]{0,3}[-*+][ \\t]+(.*)$")
 private let ORDERED = rx("^[ \\t]{0,3}[0-9]{1,9}[.)][ \\t]+(.*)$")
 private let QUOTE = rx("^[ \\t]{0,3}>[ \\t]?(.*)$")
@@ -177,13 +181,26 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
     var s = protectInline(line, base)
 
     // "[text](url)" -> "text (url)", or just the url when the label adds nothing.
+    // The url goes in as an opaque marker so the emphasis passes below cannot
+    // read its "*" or "_" as formatting; the label is still parsed.
+    var urls: [String] = []
     while let m = LINK.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) {
         guard let whole = Range(m.range, in: s) else { break }
         let label = Range(m.range(at: 1), in: s).map { String(s[$0]) } ?? ""
         let url = Range(m.range(at: 2), in: s).map { String(s[$0]) } ?? ""
         let trimmed = label.trimmingCharacters(in: .whitespaces)
+        let marker = "\u{4}\(urls.count)\u{5}"
+        urls.append(url)
         s.replaceSubrange(whole, with: trimmed.isEmpty || trimmed == url
-                          ? url : "\(trimmed) (\(url))")
+                          ? marker : "\(trimmed) (\(marker))")
+    }
+    func unmark(_ t: String) -> String {
+        guard !urls.isEmpty else { return t }
+        var out = t
+        for (i, u) in urls.enumerated().reversed() {
+            out = out.replacingOccurrences(of: "\u{4}\(i)\u{5}", with: u)
+        }
+        return out
     }
 
     // Mark emphasis with sentinels so the spans survive unescaping.
@@ -202,7 +219,7 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
     var bold = false, italic = false, strike = false
     func flush() {
         if !cur.isEmpty {
-            spans.append(Span(text: restoreEscapes(cur, base), bold: bold || forceBold,
+            spans.append(Span(text: restoreEscapes(unmark(cur), base), bold: bold || forceBold,
                               italic: italic, strike: strike))
             cur = ""
         }
@@ -248,19 +265,22 @@ private let quoteStyle: NSParagraphStyle = {
 func markdownToAttributed(_ md: String) -> NSAttributedString {
     var kinds: [LineKind] = []
     var contents: [[Span]] = []
-    var inFence = false
+    var fenceLen = 0                       // 0 = not in a fenced block
 
     // CRLF must not split twice: .newlines treats \r and \n as separate
     // delimiters, which would insert a blank line after every source line.
     let normalized = md.replacingOccurrences(of: "\r\n", with: "\n")
                        .replacingOccurrences(of: "\r", with: "\n")
     for raw in normalized.components(separatedBy: "\n") {
-        if hits(raw, FENCE) { inFence.toggle(); continue }
-        if inFence {
+        if fenceLen > 0 {
+            if let run = capture(raw, FENCE_CLOSE, 1), run.count >= fenceLen {
+                fenceLen = 0; continue
+            }
             kinds.append(.body)
             contents.append([Span(text: raw)])
             continue
         }
+        if let run = capture(raw, FENCE_OPEN, 1) { fenceLen = run.count; continue }
         if hits(raw, RULE) { continue }            // a rule has no text form
 
         if let text = capture(raw, HEADING, 2) {

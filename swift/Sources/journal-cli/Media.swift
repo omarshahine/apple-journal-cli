@@ -47,7 +47,11 @@ func resizeInto(_ src: String, _ dst: String) throws -> Bool {
 
 // ---------------------------------------------------------------- Photos library
 
-var PHOTOS_DB: String { NSHomeDirectory() + "/Pictures/Photos Library.photoslibrary/database/Photos.sqlite" }
+/// `$JOURNAL_PHOTOS_DB` points --photos-link at another library (the tests use it).
+var PHOTOS_DB: String {
+    ProcessInfo.processInfo.environment["JOURNAL_PHOTOS_DB"].flatMap { $0.isEmpty ? nil : $0 }
+        ?? NSHomeDirectory() + "/Pictures/Photos Library.photoslibrary/database/Photos.sqlite"
+}
 
 /// Best-effort PHAsset localIdentifier ("UUID/L0/001") for a media file.
 func photosLookup(_ path: String) -> String? {
@@ -75,13 +79,13 @@ func photosLookup(_ path: String) -> String? {
         guard let u = sqlite3_column_text(stmt, 0) else { continue }
         rows.append((String(cString: u), sqlite3_column_int64(stmt, 1)))
     }
-    if rows.count == 1 { return "\(rows[0].0)/L0/001" }
-    if rows.count > 1, let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-       let size = attrs[.size] as? Int64 {
-        let hits = rows.filter { $0.1 == size }
-        if hits.count == 1 { return "\(hits[0].0)/L0/001" }
-    }
-    return nil
+    // A filename alone is not identity (IMG_0001.JPG is everywhere): the size
+    // must match too, even for a single candidate. No sure match means no link,
+    // and the caller warns.
+    guard !rows.isEmpty, let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+          let size = (attrs[.size] as? NSNumber)?.int64Value else { return nil }
+    let hits = rows.filter { $0.1 == size }
+    return hits.count == 1 ? "\(hits[0].0)/L0/001" : nil
 }
 
 import SQLite3

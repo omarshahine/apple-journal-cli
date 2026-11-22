@@ -42,7 +42,15 @@ final class DB {
         bind(stmt!, params)
         var out: [[String: Any]] = []
         let n = sqlite3_column_count(stmt)
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        var rc = sqlite3_step(stmt)
+        defer {
+            // Anything but DONE (BUSY, IOERR, CORRUPT, an expression error) is a
+            // failed read, not a short result.
+            if rc != SQLITE_DONE {
+                die("sql step error: \(String(cString: sqlite3_errmsg(handle))) in \(sql.prefix(120))")
+            }
+        }
+        while rc == SQLITE_ROW {
             var row: [String: Any] = [:]
             for i in 0..<n {
                 let name = String(cString: sqlite3_column_name(stmt, i))
@@ -58,6 +66,7 @@ final class DB {
                 }
             }
             out.append(row)
+            rc = sqlite3_step(stmt)
         }
         return out
     }
