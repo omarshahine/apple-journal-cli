@@ -14,6 +14,7 @@ import argparse, json, os, shutil, sqlite3, stat, subprocess, sys, tempfile, uui
 
 GROUP = os.path.expanduser("~/Library/Group Containers/group.com.apple.moments/Library")
 DEFAULT_DB = os.path.join(GROUP, "moments.sqlite")
+VERSION = "1.4.1"                      # keep in step with npm/package.json
 BACKUPS = os.path.expanduser("~/Backups/journal-cli")
 EPOCH = 978307200                      # Core Data reference date -> unix epoch
 
@@ -1306,6 +1307,7 @@ def main():
     global DB
     p = argparse.ArgumentParser(prog="journal-cli", description=__doc__.splitlines()[0])
     p.add_argument("--db", default=os.environ.get("JOURNAL_DB", DEFAULT_DB))
+    p.add_argument("--version", action="version", version=f"journal-cli {VERSION}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def readopts(x):

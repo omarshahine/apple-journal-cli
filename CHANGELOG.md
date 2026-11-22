@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added: `--version`
+
+`journal-cli --version` prints `journal-cli <version>` and exits 0, in both the
+Swift build and the Python reference. The test suite fails if either drifts
+from `npm/package.json`, and the release workflow refuses a tag that does not
+match `Version.swift`.
+
 ## 1.4.1
 
 ### Fixed: `--db` no longer steals another option's value

@@ -50,6 +50,11 @@ jobs:
             echo "::error::Tag $VERSION does not match npm/package.json version $PKG_VERSION"
             exit 1
           fi
+          SWIFT_VERSION=$(sed -nE 's/^let JOURNAL_CLI_VERSION = "([^"]+)".*/\1/p' swift/Sources/journal-cli/Version.swift)
+          if [ "$VERSION" != "$SWIFT_VERSION" ]; then
+            echo "::error::Tag $VERSION does not match Version.swift $SWIFT_VERSION"
+            exit 1
+          fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "ARCHIVE=journal-cli-${GITHUB_REF_NAME}-macos-universal.tar.gz" >> "$GITHUB_ENV"
 

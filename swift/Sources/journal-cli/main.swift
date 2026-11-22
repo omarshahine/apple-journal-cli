@@ -6,6 +6,7 @@ import Foundation
 
 let HELP = """
 USAGE: journal-cli [--db PATH] <command> [options]
+       journal-cli --version
 
 Read and write Apple Journal entries from the local Core Data store.
 
@@ -87,6 +88,11 @@ while dbScan < argv.count {
     } else {
         dbScan += 1
     }
+}
+
+if argv.first == "--version" {
+    print("journal-cli \(JOURNAL_CLI_VERSION)")
+    exit(0)
 }
 
 guard let cmd = argv.first, cmd != "--help", cmd != "-h", cmd != "help" else {
