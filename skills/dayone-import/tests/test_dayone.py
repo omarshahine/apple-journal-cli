@@ -6,7 +6,7 @@ Everything here is synthetic: a tiny Day One schema in a temp SQLite file,
 hand-built JPEG bytes, and a stubbed journal-cli. Nothing touches Day One,
 Photos, Apple Journal, or plugin-data.
 """
-import datetime, importlib.util, io, json, os, shutil, sqlite3, struct, subprocess, sys, time
+import datetime, importlib.util, io, json, os, plistlib, shutil, sqlite3, struct, subprocess, sys, time
 import tempfile, types, unittest, zoneinfo
 from contextlib import redirect_stdout, redirect_stderr
 from unittest import mock
@@ -50,6 +50,42 @@ def make_dayone(path, entries, attachments=()):
                                :transcription, :order)""", a)
     con.commit()
     con.close()
+
+
+def jpeg_gps(lat=(47, 36, 0), lon=(122, 20, 0), den=(1, 1, 1), lat_type=5,
+             lat_ref=b"N", lon_ref=b"W"):
+    """Like jpeg_with_gps, with every GPS field adjustable to damage it."""
+    order = ">"
+    ifd0 = 8
+    gps = ifd0 + 2 + 12 + 4
+    data = gps + 2 + 4 * 12 + 4
+    tiff = bytearray(b"MM" + struct.pack(order + "HI", 42, ifd0))
+    tiff += struct.pack(order + "H", 1)
+    tiff += struct.pack(order + "HHII", 0x8825, 4, 1, gps)
+    tiff += struct.pack(order + "I", 0)
+    tiff += struct.pack(order + "H", 4)
+    tiff += struct.pack(order + "HHI", 0x0001, 2, 2) + lat_ref.ljust(4, b"\x00")
+    tiff += struct.pack(order + "HHII", 0x0002, lat_type, 3, data)
+    tiff += struct.pack(order + "HHI", 0x0003, 2, 2) + lon_ref.ljust(4, b"\x00")
+    tiff += struct.pack(order + "HHII", 0x0004, 5, 3, data + 24)
+    tiff += struct.pack(order + "I", 0)
+    for v, dn in zip(lat + lon, den + den):
+        tiff += struct.pack(order + "II", v, dn)
+    app1 = b"Exif\x00\x00" + bytes(tiff)
+    return b"\xff\xd8" + b"\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1 + b"\xff\xd9"
+
+
+def tz_archive(name):
+    """An NSKeyedArchiver'd NSTimeZone the way Day One stores ZTIMEZONE."""
+    return plistlib.dumps({
+        "$archiver": "NSKeyedArchiver", "$version": 100000,
+        "$top": {"root": plistlib.UID(1)},
+        "$objects": ["$null",
+                     {"NS.name": plistlib.UID(2), "NS.data": plistlib.UID(3),
+                      "$class": plistlib.UID(4)},
+                     name, b"",
+                     {"$classname": "NSTimeZone", "$classes": ["NSTimeZone", "NSObject"]}],
+    }, fmt=plistlib.FMT_BINARY)
 
 
 def jpeg_with_gps(lat=(47, 36, 0), lon=(122, 20, 0)):
@@ -166,6 +202,26 @@ class SnapshotTests(Tmp):
         con.close()
         self.assertFalse(os.path.exists(d))
 
+    def test_match_wraps_across_the_antimeridian(self):
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            create table ZASSET (Z_PK integer primary key, ZUUID, ZLATITUDE,
+                ZLONGITUDE, ZTRASHEDDATE, ZDATECREATED);
+            create table ZADDITIONALASSETATTRIBUTES (ZASSET, ZREVERSELOCATIONDATA,
+                ZORIGINALFILENAME, ZTIMEZONENAME, ZTIMEZONEOFFSET);
+        """)
+        wall = "2024-03-01 12:00:00"
+        target = datetime.datetime(2024, 3, 1, 12, tzinfo=datetime.timezone.utc).timestamp() - CD
+        # ~110 m apart, on opposite sides of 180 degrees.
+        con.execute("insert into ZASSET values (1, 'FIJI', -17.0, -179.9995, NULL, ?)", (target,))
+        con.execute("insert into ZADDITIONALASSETATTRIBUTES values (1, NULL, 'a.jpg', 'Pacific/Fiji', 0)")
+        hit = photoslib.match(con, wall, -17.0, 179.9995)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["uuid"], "FIJI")
+        self.assertIsNotNone(photoslib.match(con, wall, -17.0, -179.9995))
+        self.assertIsNone(photoslib.match(con, wall, -17.0, 170.0))
+
     def test_match_rejects_an_invalid_wall_clock(self):
         con = sqlite3.connect(":memory:")
         self.assertIsNone(photoslib.match(con, "0000-00-00 00:00:00", 47.6, -122.3))
@@ -202,6 +258,23 @@ class ExifTests(Tmp):
         got = di._photo_fix({"media": [bad, good], "local": "2024-01-01 10:00:00"})
         self.assertIsNotNone(got)
         self.assertAlmostEqual(got["lat"], 47.6, places=3)
+
+    def test_malformed_gps_yields_no_coordinates(self):
+        # Each of these is damage, not a location: a zero denominator used to
+        # read as 0.0 and still produce a plausible coordinate.
+        cases = {
+            "zero denominator": jpeg_gps(den=(1, 0, 1)),
+            "wrong type": jpeg_gps(lat_type=3),
+            "minutes out of range": jpeg_gps(lat=(47, 75, 0)),
+            "latitude out of range": jpeg_gps(lat=(95, 0, 0)),
+            "garbled reference": jpeg_gps(lat_ref=b"X"),
+        }
+        for why, data in cases.items():
+            g = exifgps.read(self._write("bad-%s.jpg" % why.replace(" ", "-"), data))
+            self.assertNotIn("lat", g, why)
+            self.assertNotIn("lon", g, why)
+        good = exifgps.read(self._write("good.jpg", jpeg_gps()))
+        self.assertAlmostEqual(good["lat"], 47.6, places=3)
 
     def test_invalid_capture_date_is_dropped(self):
         self.assertFalse(exifgps._valid_when("0000-00-00 00:00:00"))
@@ -256,6 +329,30 @@ class TextTests(Tmp):
             out = fh.read()
         self.assertNotIn("dayone-moment", out)
         self.assertEqual(out.count("*[missing attachment"), 2, out)
+
+    def test_fixed_offset_time_zone_is_not_utc(self):
+        db = self.p("tz.sqlite")
+        make_dayone(db, [(1, "F" * 32, 1561275673, "Lisbon\nmorning")])  # 07:41:13Z
+        con = sqlite3.connect(db)
+        con.execute("update ZENTRY set ZTIMEZONE=?", (tz_archive("GMT+0100"),))
+        con.commit(); con.close()
+        with dayone.connect(db) as c:
+            e = dayone.read_entries(c, 1, {})[0]
+        self.assertEqual(e["tz"], "GMT+0100")
+        self.assertEqual(e["utc"], "2019-06-23 07:41:13")
+        self.assertEqual(e["local"], "2019-06-23 08:41:13")
+        self.assertEqual(e["local_legacy"], "2019-06-23 07:41:13")   # how 1.4.x read it
+
+    def test_region_time_zone_has_no_legacy_reading(self):
+        db = self.p("tz2.sqlite")
+        make_dayone(db, [(1, "F" * 32, 1561275673, "x\ny")])
+        con = sqlite3.connect(db)
+        con.execute("update ZENTRY set ZTIMEZONE=?", (tz_archive("Europe/Lisbon"),))
+        con.commit(); con.close()
+        with dayone.connect(db) as c:
+            e = dayone.read_entries(c, 1, {})[0]
+        self.assertEqual(e["local"], "2019-06-23 08:41:13")
+        self.assertIsNone(e["local_legacy"])
 
     def test_longer_fence_keeps_a_shorter_fence_as_content(self):
         md = "````\n```\n---\n````"
@@ -563,6 +660,22 @@ class ImportTests(Tmp):
         with dayone.connect(self.db) as con:
             j = dayone.resolve_journal(con, "Travel")
             return {e["uuid"]: e["local"] for e in dayone.read_entries(con, j["pk"], {})}[uuid]
+
+    def test_legacy_ledger_with_a_fixed_offset_entry_still_verifies(self):
+        # Older versions read a "GMT+0100" entry's clock as UTC and imported
+        # it at that reading; fixing the zone must not refuse their ledger.
+        con = sqlite3.connect(self.db)
+        con.execute("update ZENTRY set ZTIMEZONE=? where ZUUID=?",
+                    (tz_archive("GMT+0100"), "A" * 32))
+        con.commit(); con.close()
+        with dayone.connect(self.db) as c:
+            e = {x["uuid"]: x for x in dayone.read_entries(c, 1, {})}["A" * 32]
+        self.assertNotEqual(e["local"], e["local_legacy"])
+        self._legacy_ledger({"A" * 32: 100})
+        cli = FakeCLI()
+        cli.add(e["local_legacy"], "First", "body one", pk=100)
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 2)                  # B and C only
 
     def test_legacy_rehearsal_ledger_is_refused_by_a_live_import(self):
         # Before ledgers were tagged, a rehearsal wrote sandbox ids into the

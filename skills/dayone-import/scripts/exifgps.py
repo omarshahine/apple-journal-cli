@@ -10,11 +10,42 @@ import struct
 
 
 def _rational(b, off, order, n):
+    """n unsigned rationals; a zero denominator is damage, not 0.0."""
     out = []
     for i in range(n):
         num, den = struct.unpack(order + "II", b[off + i * 8: off + i * 8 + 8])
-        out.append(num / den if den else 0.0)
+        if not den:
+            raise ValueError("zero denominator")
+        out.append(num / den)
     return out
+
+
+def _dms(tiff, entry, order, limit):
+    """Degrees, minutes, seconds -> decimal degrees, or None if malformed.
+
+    The tag must be three RATIONALs (type 5), every denominator non-zero,
+    minutes and seconds under 60, and the result within `limit` degrees.
+    """
+    typ, cnt, val = entry
+    if typ != 5 or cnt != 3 or val + 24 > len(tiff):
+        return None
+    try:
+        d, m, s = _rational(tiff, val, order, 3)
+    except (ValueError, struct.error):
+        return None
+    if m >= 60 or s >= 60:
+        return None
+    deg = d + m / 60 + s / 3600
+    return deg if deg <= limit else None
+
+
+def _ref(tiff, entry, allowed):
+    """A GPS reference letter (ASCII, type 2), or None if absent/garbled."""
+    typ, cnt, val = entry
+    if typ != 2 or cnt < 1 or val >= len(tiff):
+        return None
+    c = tiff[val:val + 1].decode("ascii", "ignore")
+    return c if c in allowed else None
 
 
 def _ifd(b, base, off, order, want):
@@ -120,18 +151,20 @@ def _parse(b, out):
     gps_off = struct.unpack(order + "I",
                             tiff[top[0x8825][2]:top[0x8825][2] + 4])[0]
     g = _ifd(tiff, 0, gps_off, order, {0x0001, 0x0002, 0x0003, 0x0004})
-    if 0x0002 not in g or 0x0004 not in g:
+    # Both coordinates or neither: damaged GPS metadata must not yield a
+    # plausible-looking location (an entry with none would take it on trust).
+    # The capture time read above stands on its own and is kept.
+    if not all(t in g for t in (0x0001, 0x0002, 0x0003, 0x0004)):
         return
-    try:
-        lat = _rational(tiff, g[0x0002][2], order, 3)
-        lon = _rational(tiff, g[0x0004][2], order, 3)
-    except struct.error:
+    lat = _dms(tiff, g[0x0002], order, 90)
+    lon = _dms(tiff, g[0x0004], order, 180)
+    lat_ref = _ref(tiff, g[0x0001], "NS")
+    lon_ref = _ref(tiff, g[0x0003], "EW")
+    if None in (lat, lon, lat_ref, lon_ref):
         return
-    lat = lat[0] + lat[1] / 60 + lat[2] / 3600
-    lon = lon[0] + lon[1] / 60 + lon[2] / 3600
-    if 0x0001 in g and tiff[g[0x0001][2]:g[0x0001][2] + 1] in (b"S",):
+    if lat_ref == "S":
         lat = -lat
-    if 0x0003 in g and tiff[g[0x0003][2]:g[0x0003][2] + 1] in (b"W",):
+    if lon_ref == "W":
         lon = -lon
     if lat or lon:
         out["lat"], out["lon"] = lat, lon

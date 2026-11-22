@@ -31,7 +31,11 @@ Day One's markdown export renders **every** timestamp in the exporting
 machine's current timezone, not the zone the entry was written in. Entries
 written abroad come out hours off, and some land on the wrong calendar day.
 The original zone is still in the store (an archived `NSTimeZone` per entry),
-so this reads that directly.
+so this reads that directly: a Region/City name, or a fixed offset such as
+`GMT+0100`. Earlier versions missed fixed-offset zones and read the entry's
+clock as UTC. Ledgers from those imports still verify against that reading,
+and a zone that cannot be read is named on stderr rather than silently shown
+as UTC.
 
 The store is unencrypted at
 `~/Library/Group Containers/5U8NS4GX82.dayoneapp2/Data/Documents/DayOne.sqlite`.
@@ -256,11 +260,18 @@ rules keep it from doing harm, both learned the hard way:
   up" means leave it alone. Entries that had *no* location just take the EXIF
   coordinates. `--trust-exif` disables this; `--skip ID,ID` vetoes specific
   entries.
+- **Damaged GPS is no location.** Coordinates are used only when every GPS
+  field is well formed (three RATIONALs, non-zero denominators, minutes and
+  seconds under 60, in range, with an N/S and E/W reference). Otherwise the
+  photo contributes no coordinates, though its capture time still counts,
+  so a damaged tag can never become a plausible-looking wrong place.
 
 Place names come from Photos' reverse-geocode data, which is Apple's own and
 matches what Photos shows. Matching is on the photo's **wall clock** against
 `ZDATECREATED + ZTIMEZONEOFFSET` plus GPS proximity — never on a timezone
-derived from the entry, since that is often the very thing that is wrong.
+derived from the entry, since that is often the very thing that is wrong. The
+proximity window wraps at ±180° longitude, so photos either side of the
+antimeridian (Fiji, Kiribati, the Aleutians) still match.
 
 Report what it left alone as well as what it changed; a skipped entry is a
 judgement call the user may want to overrule.

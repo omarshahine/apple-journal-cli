@@ -54,18 +54,27 @@ private let EMPH = rx("(?<![\\w*_])([*_])(?=\\S)([^*_]+?)(?<=\\S)\\1(?![\\w*_])"
 private let ESCAPABLE = Array("\\`*_{}[]()#+-.!>~|")
 
 /// Pick a private-use window this text does not already use, so a literal
-/// U+E000 in someone's entry is never mistaken for our own sentinel and
-/// rewritten as punctuation.
+/// private-use character in someone's entry is never mistaken for our own
+/// sentinel and rewritten as punctuation. The BMP block is tried first, then
+/// the two supplementary private-use planes; a line would need well over a
+/// hundred thousand distinct private-use characters to occupy every window,
+/// and then the render is refused rather than any character reinterpreted.
+private let PRIVATE_USE: [ClosedRange<UInt32>] = [0xE000...0xF8FF, 0xF0000...0xFFFFD, 0x100000...0x10FFFD]
+
 private func escapeBase(for s: String) -> UInt32 {
     let width = UInt32(ESCAPABLE.count)
-    let used = Set(s.unicodeScalars.map { $0.value }.filter { $0 >= 0xE000 && $0 <= 0xF8FF })
+    let used = Set(s.unicodeScalars.map { $0.value }
+        .filter { v in PRIVATE_USE.contains { $0.contains(v) } })
     if used.isEmpty { return 0xE000 }
-    var base: UInt32 = 0xE000
-    while base + width <= 0xF8FF {
-        if !(base..<(base + width)).contains(where: { used.contains($0) }) { return base }
-        base += width
+    for block in PRIVATE_USE {
+        var base = block.lowerBound
+        while base + width - 1 <= block.upperBound {
+            if !(base..<(base + width)).contains(where: { used.contains($0) }) { return base }
+            base += width
+        }
     }
-    return 0xE000
+    die("text uses every private-use window markdown escaping needs; "
+        + "pass it without --markdown")
 }
 
 // One pass over the line, so precedence is explicit: a backslash escape makes
@@ -204,20 +213,26 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
         return out
     }
 
-    // Mark emphasis with sentinels so the spans survive unescaping.
-    let B = "\u{1}", I = "\u{2}", S = "\u{3}"
+    // Mark emphasis with sentinels so the spans survive unescaping. Opening
+    // and closing marks differ, and each style counts its depth: a single
+    // toggle would turn bold OFF at the inner "__" of "**a __b__ c**".
+    let B = "\u{1}", I = "\u{2}", S = "\u{3}"           // open
+    let b = "\u{6}", i = "\u{7}", z = "\u{8}"           // close
     // Triple delimiters first: otherwise the strong pass eats two and the
     // emphasis pass eats the rest, losing bold from "***both***".
-    s = sub(s, TRIPLE_STAR, "\(B)\(I)$1\(I)\(B)")
-    s = sub(s, TRIPLE_UNDER, "\(B)\(I)$1\(I)\(B)")
-    s = sub(s, STRONG_STAR, "\(B)$1\(B)")
-    s = sub(s, STRONG_UNDER, "\(B)$1\(B)")
-    s = sub(s, STRIKE, "\(S)$2\(S)")
-    s = sub(s, EMPH, "\(I)$2\(I)")
+    s = sub(s, TRIPLE_STAR, "\(B)\(I)$1\(i)\(b)")
+    s = sub(s, TRIPLE_UNDER, "\(B)\(I)$1\(i)\(b)")
+    s = sub(s, STRONG_STAR, "\(B)$1\(b)")
+    s = sub(s, STRONG_UNDER, "\(B)$1\(b)")
+    s = sub(s, STRIKE, "\(S)$2\(z)")
+    s = sub(s, EMPH, "\(I)$2\(i)")
 
     var spans: [Span] = []
     var cur = ""
-    var bold = false, italic = false, strike = false
+    var boldDepth = 0, italicDepth = 0, strikeDepth = 0
+    var bold: Bool { boldDepth > 0 }
+    var italic: Bool { italicDepth > 0 }
+    var strike: Bool { strikeDepth > 0 }
     func flush() {
         if !cur.isEmpty {
             spans.append(Span(text: restoreEscapes(unmark(cur), base), bold: bold || forceBold,
@@ -227,9 +242,12 @@ private func inlineSpans(_ line: String, forceBold: Bool) -> [Span] {
     }
     for ch in s {
         switch ch {
-        case "\u{1}": flush(); bold.toggle()
-        case "\u{2}": flush(); italic.toggle()
-        case "\u{3}": flush(); strike.toggle()
+        case "\u{1}": flush(); boldDepth += 1
+        case "\u{6}": flush(); boldDepth = max(0, boldDepth - 1)
+        case "\u{2}": flush(); italicDepth += 1
+        case "\u{7}": flush(); italicDepth = max(0, italicDepth - 1)
+        case "\u{3}": flush(); strikeDepth += 1
+        case "\u{8}": flush(); strikeDepth = max(0, strikeDepth - 1)
         default: cur.append(ch)
         }
     }

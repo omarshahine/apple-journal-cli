@@ -542,6 +542,13 @@ if [ $? -eq 0 ]; then
   ok "fenced blank lines kept"          "$(printf '```\na\n\n\nb\n  \nc\n```' | "$CLI" render --plain | python3 -c 'import sys;print(repr(sys.stdin.read()))')" "'a\\n\\n\\nb\\n  \\nc'"
   ok "trailing fenced blank lines kept" "$(printf '```\na\n\n\n```' | "$CLI" render | python3 -c 'import sys;r=sys.stdin.read();print(r[r.rindex(" a")+2:].count(chr(92)+chr(10)))')" "2"
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
+  # --- third review pass (Markdown): nested emphasis and private-use text ---
+  ok "nested bold stays bold"          "$("$CLI" render --body '**outer __inner__ outer**' | grep -c 'b0')" "0"
+  PUAFILE="$SB/pua.md"
+  python3 "$ROOT/tests/make-pua.py" "$PUAFILE"
+  PUAWANT=$(python3 "$ROOT/tests/make-pua.py" --expect)
+  ok "private-use text survives a full BMP window" "$("$CLI" render --body-file "$PUAFILE" --plain)" "$PUAWANT"
+  # --- end third review pass (Markdown) ---
   # Fixed-format dates ignore the user's calendar (-AppleLocale is a
   # Foundation argument-domain default, honored per process).
   BUD="th_TH@calendar=buddhist"
