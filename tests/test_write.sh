@@ -164,6 +164,9 @@ ok "location scoped to its entry" "$(entryfiles "$EXP" "$LPK" | xargs -r grep -l
 echo "T7 edit"
 EOUT=$("$CLI" --db "$DB" write --body "Original body." --title "Original" 2>&1)
 EPK=$(echo "$EOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+# Start from a synced entry, or the "marked unsynced" check below proves nothing.
+sqlite3 "$DB" "update ZJOURNALENTRYMO set ZISUPLOADEDTOCLOUD=1 where Z_PK=$EPK;"
+ok "edit starts from a synced entry" "$(sqlite3 "$DB" "select ZISUPLOADEDTOCLOUD from ZJOURNALENTRYMO where Z_PK=$EPK;")" "1"
 "$CLI" --db "$DB" edit $EPK --body "Rewritten body." --title "Rewritten" >/dev/null 2>&1
 ok "body updated" "$("$CLI" --db "$DB" show $EPK --json | jq_ 'd["text"]')" "Rewritten body."
 ok "title updated" "$("$CLI" --db "$DB" show $EPK --json | jq_ 'd["title"]')" "Rewritten"
@@ -229,6 +232,15 @@ ok "remove-all cleared files" "$([ -z "$(find "$ATT/$RUUID" -type f 2>/dev/null)
 
 echo "T7b CRDT guard"
 CPK=$(sqlite3 "$DB" "select Z_PK from ZJOURNALENTRYMO where ZMERGEABLEATTRIBUTES is not null limit 1;")
+if [ -z "$CPK" ]; then
+  # The synthetic fixture has no app-authored entries. Make one: Journal.app
+  # writes a CRDT merge copy into ZMERGEABLEATTRIBUTES, which is all the guard
+  # keys on. Without this the block below used to run zero assertions in CI.
+  COUT=$("$CLI" --db "$DB" write --body "app authored" 2>&1)
+  CPK=$(echo "$COUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=x'6372647407000000' where Z_PK=$CPK;"
+fi
+ok "CRDT entry available" "$([ -n "$CPK" ] && echo yes || echo no)" "yes"
 if [ -n "$CPK" ]; then
   "$CLI" --db "$DB" edit $CPK --body "should be refused" >/dev/null 2>&1
   ok "text edit refused on CRDT entry" "$?" "1"
@@ -526,6 +538,13 @@ if [ $? -eq 0 ]; then
   ok "inline code kept verbatim"      "$(printf 'Use `**lit**` here' | "$CLI" render --plain)" "Use \`**lit**\` here"
   ok "title keeps list-like text"     "$(printf '1. first' | "$CLI" render --inline)" "1. first"
   ok "image syntax untouched"         "$(printf '![alt](https://e.com/i.png)' | "$CLI" render --plain)" '![alt](https://e.com/i.png)'
+  ok "link destination kept literal"  "$("$CLI" render --body '[link](https://example.com/*item*)' --plain)" "link (https://example.com/*item*)"
+  ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
+  # Fixed-format dates ignore the user's calendar (-AppleLocale is a
+  # Foundation argument-domain default, honored per process).
+  CALOUT=$("$CLI" --db "$DB" write --body "calendar" --date 2026-01-05 2>&1)
+  CALPK=$(echo "$CALOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+  ok "dates stay Gregorian under a Buddhist calendar" "$("$CLI" --db "$DB" show $CALPK --json -AppleLocale th_TH@calendar=buddhist | jq_ 'd["date"][:10]')" "2026-01-05"
 
   # The global --db pass must not take an option's value for itself. It used
   # to treat `--body --db` as a database selector and eat the next argument.
@@ -654,6 +673,67 @@ N3=$(ent_count)
 ok "aborted write refused" "$?" "1"
 ok "aborted write wrote nothing" "$(ent_count)" "$N3"
 ok "aborted write leaves no folders" "$(find "$ATT" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" "$DIRS0"
+
+echo "T19 reads and export"
+# `--` ends the options, so a query can be a literal "--db".
+DOUT=$("$CLI" --db "$DB" write --body "flag text --db in a body" 2>&1)
+DPK=$(echo "$DOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ok "search -- --db finds the text" "$("$CLI" --db "$DB" search --json -- --db | jq_ '[e["id"] for e in d].count('"$DPK"')')" "1"
+
+# Attachment-only entries are entries: export used to drop them.
+AOUT=$("$CLI" --db "$DB" write --media "$IMG" 2>&1)
+APK=$(echo "$AOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+EXP2="$SB/exp2"; "$CLI" --db "$DB" export --dir "$EXP2" >/dev/null 2>&1
+ok "export keeps an attachment-only entry (md)" "$(entryfiles "$EXP2" "$APK" | wc -l | tr -d ' ')" "1"
+EXP3="$SB/exp3"; "$CLI" --db "$DB" export --dir "$EXP3" --format json >/dev/null 2>&1
+ok "export keeps an attachment-only entry (json)" "$(jq_ '[e["id"] for e in d].count('"$APK"')' < "$EXP3/journal.json")" "1"
+
+# Location names are YAML-escaped, like titles.
+NASTY='Joe'"'"'s "Bar" \ Grill'
+YOUT=$("$CLI" --db "$DB" write --body "Quoted place." --lat 47.6 --lon -122.3 --place "$NASTY" 2>&1)
+YPK=$(echo "$YOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+EXP4="$SB/exp4"; "$CLI" --db "$DB" export --dir "$EXP4" >/dev/null 2>&1
+YFILE=$(entryfiles "$EXP4" "$YPK")
+ok "location name round-trips through YAML" "$(python3 -c '
+import json,sys
+for line in open(sys.argv[1]):
+    if line.startswith("  - name: "): print(json.loads(line[len("  - name: "):])); break
+' "$YFILE")" "$NASTY"
+
+# Export failures are errors, not "Wrote N entries".
+: > "$SB/export-target-is-a-file"
+"$CLI" --db "$DB" export --dir "$SB/export-target-is-a-file" >/dev/null 2>&1
+ok "export to a file path fails (md)" "$?" "1"
+"$CLI" --db "$DB" export --dir "$SB/export-target-is-a-file" --format json >/dev/null 2>&1
+ok "export to a file path fails (json)" "$?" "1"
+
+# A query that fails while stepping is an error, not an empty result.
+SB3=$(mktemp -d /tmp/journal-sandbox3.XXXXXX)
+DB3=$("$CLI" sandbox --dir "$SB3" --from "$DB")
+sqlite3 "$DB3" "alter table ZJOURNALENTRYMO rename to ZREAL;
+  create view ZJOURNALENTRYMO as select Z_PK, ZID, abs(-9223372036854775807-1) as ZENTRYDATE,
+    ZTEXTLENGTH, ZFLAGGED, ZISDRAFT, ZISUPLOADEDTOCLOUD, ZTITLE, ZTEXT, ZISFULLYREMOVED,
+    ZRECENTLYDELETED from ZREAL;"
+"$CLI" --db "$DB3" list --json >/dev/null 2>&1
+ok "step error fails the read" "$?" "1"
+trash "$SB3" 2>/dev/null
+
+# --photos-link needs the size to match, even for a single filename hit.
+PHDB="$SB/Photos.sqlite"
+cp "$IMG" "$SB/IMG_0001.png"
+SIZE=$(stat -f %z "$SB/IMG_0001.png")
+sqlite3 "$PHDB" "create table ZASSET (Z_PK integer primary key, ZUUID text);
+  create table ZADDITIONALASSETATTRIBUTES (Z_PK integer primary key, ZASSET integer,
+    ZORIGINALFILENAME text, ZORIGINALFILESIZE integer);
+  insert into ZASSET values (1, '11111111-2222-3333-4444-555555555555');
+  insert into ZADDITIONALASSETATTRIBUTES values (1, 1, 'IMG_0001.png', $((SIZE + 1)));"
+POUT=$(JOURNAL_PHOTOS_DB="$PHDB" "$CLI" --db "$DB" write --body "Not that photo." --media "$SB/IMG_0001.png" --photos-link 2>&1)
+PPK=$(echo "$POUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ok "different-sized namesake is not linked" "$(sqlite3 "$DB" "select max(instr(coalesce(ZASSETMETADATA,''),'11111111-2222-3333-4444-555555555555')>0) from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "0"
+sqlite3 "$PHDB" "update ZADDITIONALASSETATTRIBUTES set ZORIGINALFILESIZE=$SIZE;"
+POUT=$(JOURNAL_PHOTOS_DB="$PHDB" "$CLI" --db "$DB" write --body "That photo." --media "$SB/IMG_0001.png" --photos-link 2>&1)
+PPK=$(echo "$POUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+ok "same-sized namesake is linked" "$(sqlite3 "$DB" "select max(instr(coalesce(ZASSETMETADATA,''),'11111111-2222-3333-4444-555555555555')>0) from ZJOURNALENTRYASSETMO where ZENTRY=$PPK;")" "1"
 
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"

@@ -51,6 +51,8 @@ WRITE (guarded: --live required against the real store; auto-backup first)
   Journal's rich text: headings and **bold** become real formatting rather
   than literal syntax. --body-rtf F stores a prepared RTF file verbatim.
 
+  `--` ends the options: `search -- --db` searches for the text "--db".
+
   Every mutating command also takes --dry-run (print the plan, write nothing)
   and --accept-risk (one-time risk acknowledgment; see the README warning).
 """
@@ -79,6 +81,7 @@ let listFlags: Set<String> = ["--media", "--add-media", "--live-photo", "--remov
 var dbScan = 0
 while dbScan < argv.count {
     let tok = argv[dbScan]
+    if tok == "--" { break }                 // after `--` everything is positional
     if tok == "--db" {
         guard dbScan + 1 < argv.count else { die("--db needs a value") }
         DB_PATH = (argv[dbScan + 1] as NSString).expandingTildeInPath

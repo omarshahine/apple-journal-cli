@@ -65,19 +65,26 @@ func journalRunning() -> Bool {
     return p.terminationStatus == 0
 }
 
-func fmtDate(_ cdTimestamp: Double) -> String {
+/// Fixed-format dates must not follow the user's calendar or locale: a
+/// Buddhist or Japanese calendar would otherwise turn 2026 into 2569 or 0008.
+/// The time zone stays local, since entry dates are local wall-clock times.
+private func fixedFormatter(_ format: String) -> DateFormatter {
     let f = DateFormatter()
-    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.calendar = Calendar(identifier: .gregorian)
     f.timeZone = .current
+    f.dateFormat = format
+    return f
+}
+
+func fmtDate(_ cdTimestamp: Double) -> String {
+    let f = fixedFormatter("yyyy-MM-dd HH:mm:ss")
     return f.string(from: Date(timeIntervalSince1970: cdTimestamp + CORE_DATA_EPOCH))
 }
 
 func parseDate(_ s: String) -> Date {
     for fmt in ["yyyy-MM-dd", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"] {
-        let f = DateFormatter()
-        f.dateFormat = fmt
-        f.timeZone = .current
-        if let d = f.date(from: s) { return d }
+        if let d = fixedFormatter(fmt).date(from: s) { return d }
     }
     die("cannot parse date '\(s)' (use YYYY-MM-DD)")
 }
@@ -94,6 +101,9 @@ struct Args {
         var i = 0
         while i < raw.count {
             let a = raw[i]
+            if a == "--" {                       // end of options: the rest is positional
+                positional.append(contentsOf: raw[(i + 1)...]); break
+            }
             if boolFlags.contains(a) {
                 present.insert(a)
             } else if valueFlags.contains(a) {

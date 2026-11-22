@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: reads, export and Markdown
+
+From the same full Clawpatch review. Swift and the Python reference both,
+where both have the code, with regression tests.
+
+- **Failed reads are errors.** A SQLite query that failed part way (busy,
+  I/O error, corruption) used to return whatever rows it had, so `list` or
+  `export` could look complete when they were not. Now it exits 1. In the
+  Python reference, a failed `textutil` RTF conversion is an error instead of
+  an entry silently dropped from the output.
+- **Export keeps attachment-only entries** (a photo, a map, no words) in both
+  Markdown and JSON, and fails with the path when it cannot create the folder or
+  write a file, instead of reporting "Wrote N entries".
+- **Location names are YAML-escaped** in Markdown export front matter, as
+  titles already were. A quote or backslash in a place name broke the YAML.
+- **Dates ignore the user's calendar.** Under a Buddhist or Japanese calendar,
+  `2026-01-05` came out as `2569-01-05`, and `--date` parsed the same way.
+  Fixed formats now use the Gregorian calendar and `en_US_POSIX`, still in the
+  local time zone.
+- **`--` ends the options**, so `journal-cli search -- --db` searches for the
+  text "--db".
+- **`--photos-link` checks the size** of a single filename match too, so a
+  different photo that happens to share a name like `IMG_0001.JPG` is no longer
+  linked.
+- **Markdown:** a link destination keeps its `*` and `_`
+  (`[x](https://e.com/*a*)` no longer italicizes part of the URL), and a line
+  like ```` ```literal ```` inside a fenced block stays content. Only a bare
+  fence at least as long as the opening one closes the block.
+- **Tests:** the edit sync check now starts from a synced entry, and the CRDT
+  guard tests, which ran zero assertions against the synthetic fixture, build
+  their own app-authored entry and fail if they can't.
+
 ## 1.4.3
 
 ### Fixed: data safety for live writes and reads

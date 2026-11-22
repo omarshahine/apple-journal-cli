@@ -265,11 +265,16 @@ def rtf_batch(blobs):
         for i in idxs:
             n = os.path.join(d, f"{i}.rtf")
             open(n, "wb").write(blobs[i]); names.append(n)
-        subprocess.run(["textutil", "-convert", "txt"] + names, capture_output=True, timeout=180)
+        r = subprocess.run(["textutil", "-convert", "txt"] + names, capture_output=True, timeout=180)
+        missing = [i for i in idxs if not os.path.exists(os.path.join(d, f"{i}.txt"))]
+        # A failed conversion must not read as empty text: fetch would drop the
+        # entry and export would report success without it.
+        if r.returncode != 0 or missing:
+            err = r.stderr.decode(errors="replace").strip()
+            die(f"textutil could not convert {len(missing) or 'some'} RTF blob(s)"
+                + (f": {err}" if err else ""))
         for i in idxs:
-            t = os.path.join(d, f"{i}.txt")
-            if os.path.exists(t):
-                out[i] = open(t, errors="replace").read().strip()
+            out[i] = open(os.path.join(d, f"{i}.txt"), errors="replace").read().strip()
     finally:
         shutil.rmtree(d, ignore_errors=True)
     return out
@@ -313,7 +318,9 @@ def resize_into(src, dst):
     shutil.copy2(src, dst)
     return False
 
-PHOTOS_DB = os.path.expanduser("~/Pictures/Photos Library.photoslibrary/database/Photos.sqlite")
+# $JOURNAL_PHOTOS_DB points --photos-link at another library (the tests use it).
+PHOTOS_DB = (os.environ.get("JOURNAL_PHOTOS_DB")
+             or os.path.expanduser("~/Pictures/Photos Library.photoslibrary/database/Photos.sqlite"))
 
 def photos_lookup(path):
     """Best-effort PHAsset localIdentifier ('UUID/L0/001') for a media file."""
@@ -337,14 +344,13 @@ def photos_lookup(path):
         c.close()
     except Exception:
         return None
-    if len(rows) == 1:
-        return f"{rows[0][0]}/L0/001"
-    if len(rows) > 1 and os.path.exists(path):
-        size = os.path.getsize(path)
-        hits = [r for r in rows if r[1] == size]
-        if len(hits) == 1:
-            return f"{hits[0][0]}/L0/001"
-    return None
+    # A filename alone is not identity (IMG_0001.JPG is everywhere): the size
+    # must match too, even for a single candidate.
+    if not rows or not os.path.exists(path):
+        return None
+    size = os.path.getsize(path)
+    hits = [r for r in rows if r[1] == size]
+    return f"{hits[0][0]}/L0/001" if len(hits) == 1 else None
 
 
 # ---------------------------------------------------------------- links
@@ -585,14 +591,30 @@ def cmd_search(a):
     render(hits, a.json, a.limit, a.full)
 
 def cmd_export(a):
-    os.makedirs(a.dir, exist_ok=True)
+    try:
+        os.makedirs(a.dir, exist_ok=True)
+    except OSError as e:
+        die(f"cannot create {a.dir}: {e.strerror}")
     with Snapshot() as c:
-        ents = fetch(c)
-        for e in ents: e["assets"] = assets_for(c, e["id"])
+        # Keep entries with words OR assets: photo- or location-only entries count.
+        ents = []
+        for e in fetch(c, include_empty=True):
+            e["assets"] = assets_for(c, e["id"])
+            if e["text"] or e["title"] or e["assets"]: ents.append(e)
     if a.format == "json":
         p = os.path.join(a.dir, "journal.json")
-        json.dump(ents, open(p, "w"), indent=2, ensure_ascii=False)
+        try:
+            with open(p, "w") as f: json.dump(ents, f, indent=2, ensure_ascii=False)
+        except OSError as e:
+            die(f"cannot write {p}: {e.strerror}")
         print(f"Wrote {len(ents)} entries to {p}"); return
+    try:
+        _export_md(a, ents)
+    except OSError as e:
+        die(f"cannot write to {a.dir}: {e.strerror}")
+    print(f"Wrote {len(ents)} entries to {a.dir}")
+
+def _export_md(a, ents):
     for e in ents:
         slug = "".join(ch if ch.isalnum() or ch in "-_ " else "" for ch in (e["title"] or ""))
         slug = slug[:50].strip().replace(" ", "-")
@@ -613,7 +635,6 @@ def cmd_export(a):
                 f.write("\n")
                 for x in files:
                     f.write(f"![{x['name']}]({x['path']})\n")
-    print(f"Wrote {len(ents)} entries to {a.dir}")
 
 def cmd_stats(a):
     with Snapshot() as c:

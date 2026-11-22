@@ -343,7 +343,8 @@ tests/test_write.sh                # full suite against a store copy
 
 `JOURNAL_BACKUP_DIR=DIR` sends backups to `DIR` instead of
 `~/Backups/journal-cli/`, and makes sandbox writes take one too, which is how
-the suite tests backups.
+the suite tests backups. `JOURNAL_PHOTOS_DB=FILE` points `--photos-link` at
+another Photos library database.
 
 The `reference/` directory holds the original Python implementation — same
 command surface, same test suite, useful for spelunking since it needs no
