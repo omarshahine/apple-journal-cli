@@ -122,9 +122,15 @@ other devices. `sync-journals` is a read-only audit and instruction command.
 - **Resumable.** Progress is kept in an import ledger keyed by Day One UUID.
   Each write is marked *pending* before journal-cli runs and recorded as done
   (written and fsynced) the moment it succeeds, so a re-run skips what landed.
-  If a run is killed mid-write, the next run reconciles that one entry by
-  looking for it in the destination by its exact date: found, it is recorded;
-  absent, it is written; ambiguous, the import stops and names the candidates.
+  If a run is killed mid-write, or journal-cli exits nonzero (it can be killed
+  after its commit), that entry is reconciled against the destination before
+  anything else happens. It only counts as landed if a destination entry was
+  created during that run (its id is above the highest id when the run
+  started), is not already claimed by another Day One entry, has the same
+  instant (compared as an epoch, so a timezone change between runs does not
+  matter), and has the same rendered title and text. Found, it is recorded;
+  absent, it is written again (or, after a nonzero exit, recorded as failed);
+  ambiguous, the import stops and names the candidates.
   The ledger is also checked before the first write, so an unwritable ledger
   stops the import before anything lands. Delete the ledger to force a full
   re-import.
@@ -133,7 +139,10 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   `<journal>.json`, a sandbox rehearsal gets `<journal>.sandbox-<hash>.json`.
   Each ledger records which journal and destination it belongs to, and
   `import`, `fix-text` and `fix-locations` refuse a ledger that does not match
-  (pass `--target-db` for a sandbox, or `--state FILE` to choose one). A
+  (pass `--target-db` for a sandbox, or `--state FILE` to choose one). The
+  destination is resolved the way journal-cli resolves it: `--target-db`,
+  else `$JOURNAL_DB`, else the real store, so a `$JOURNAL_DB` sandbox gets a
+  sandbox ledger too. A
   relative `--state` path is resolved against the current folder.
 
   Nothing can regenerate a ledger, and `fix-text` / `fix-locations` need it

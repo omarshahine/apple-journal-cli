@@ -6,7 +6,7 @@ Everything here is synthetic: a tiny Day One schema in a temp SQLite file,
 hand-built JPEG bytes, and a stubbed journal-cli. Nothing touches Day One,
 Photos, Apple Journal, or plugin-data.
 """
-import importlib.util, io, json, os, shutil, sqlite3, struct, subprocess, sys
+import datetime, importlib.util, io, json, os, shutil, sqlite3, struct, subprocess, sys, time
 import tempfile, types, unittest
 from contextlib import redirect_stdout, redirect_stderr
 from unittest import mock
@@ -249,10 +249,26 @@ class TextTests(Tmp):
 # --------------------------------------------------------------------- import
 
 class FakeCLI:
-    """Stands in for journal-cli. Writes append to `store`; list returns it."""
+    """Stands in for journal-cli.
 
-    def __init__(self, die_on_write=None):
-        self.store, self.writes, self.die_on_write = [], [], die_on_write
+    `render` echoes its input (enough to make content fingerprints line up),
+    `write` reads --date as a wall clock in the current zone like the real
+    CLI and appends to `store`, and `list` prints each entry's date in the
+    *current* zone, so a timezone change between runs shows up as it would.
+    """
+
+    def __init__(self, die_on_write=None, fail_after_commit=None):
+        self.store, self.writes = [], []
+        self.die_on_write = die_on_write              # raise mid-write (killed)
+        self.fail_after_commit = fail_after_commit    # commit, then exit 1
+        self.next_pk = 100
+
+    def add(self, date, title="", text="", pk=None):
+        pk = pk if pk is not None else self.next_pk
+        self.next_pk = max(self.next_pk, pk + 1)
+        self.store.append({"id": pk, "epoch": di._wall_epoch(date),
+                           "title": title, "text": text})
+        return pk
 
     def __call__(self, cmd, *a, **kw):
         args = list(cmd[1:])
@@ -260,20 +276,32 @@ class FakeCLI:
             args = args[2:]
         verb = args[0]
         if verb == "render":
-            return subprocess.CompletedProcess(cmd, 0, b"x", b"")
+            return subprocess.CompletedProcess(cmd, 0, kw.get("input") or b"", b"")
         if verb == "write" and "--dry-run" in args:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         if verb == "write":
             self.writes.append(args)
             if self.die_on_write and len(self.writes) == self.die_on_write:
                 raise KeyboardInterrupt          # run killed mid-write
-            pk = len(self.store) + 100
-            self.store.append({"id": pk, "date": args[args.index("--date") + 1],
-                               "title": ""})
+
+            def get(flag):
+                return args[args.index(flag) + 1] if flag in args else ""
+            pk = self.add(get("--date"), get("--title"), get("--body"))
+            if self.fail_after_commit and len(self.writes) == self.fail_after_commit:
+                return subprocess.CompletedProcess(cmd, 1, "", "killed after commit")
             return subprocess.CompletedProcess(cmd, 0, "Created entry %d." % pk, "")
         if verb == "list":
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(self.store), "")
+            rows = [{"id": r["id"], "title": r["title"], "text": r["text"],
+                     "date": time.strftime("%Y-%m-%d %H:%M:%S",
+                                           time.localtime(r["epoch"]))}
+                    for r in self.store]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(rows), "")
         raise AssertionError("unexpected journal-cli call: %r" % cmd)
+
+
+def set_tz(name):
+    os.environ["TZ"] = name
+    time.tzset()
 
 
 class ImportTests(Tmp):
@@ -291,6 +319,12 @@ class ImportTests(Tmp):
             patcher = mock.patch.object(di, k, v)
             patcher.start()
             self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(time.tzset)
+        self.addCleanup(env.stop)
+        os.environ.pop("JOURNAL_DB", None)
+        set_tz("America/Los_Angeles")
 
     def args(self, **kw):
         base = dict(db=self.db, journal="Travel", into="Staging", export=None,
@@ -305,24 +339,28 @@ class ImportTests(Tmp):
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             di.cmd_import(self.args(**kw))
 
-    def test_interrupted_import_does_not_replay(self):
-        cli = FakeCLI(die_on_write=2)
+    def ledger(self, **kw):
+        with open(di.ledger_path(self.args(**kw), "Travel")) as fh:
+            return json.load(fh)
+
+    def kill_second_write_after_it_lands(self, cli):
+        """Run until the 2nd write, then store it as if it had committed."""
         with self.assertRaises(KeyboardInterrupt):
             self.run_import(cli)
-        # The first write was recorded the moment it succeeded.
-        ledger = json.load(open(di.ledger_path(self.args(), "Travel")))
-        self.assertEqual(ledger["done"], {"A" * 32: 100})
-        # The second write landed in the store before the kill; resume must
-        # reconcile it rather than write it again.
-        cli.store.append({"id": 101, "date": cli.writes[1][cli.writes[1].index("--date") + 1],
-                          "title": ""})
+        w = cli.writes[1]
+        cli.add(w[w.index("--date") + 1], w[w.index("--title") + 1],
+                w[w.index("--body") + 1])
         cli.die_on_write = None
+
+    def test_interrupted_import_does_not_replay(self):
+        cli = FakeCLI(die_on_write=2)
+        self.kill_second_write_after_it_lands(cli)
+        self.assertEqual(self.ledger()["done"], {"A" * 32: 100})   # recorded at once
         self.run_import(cli)
-        dates = [w[w.index("--date") + 1] for w in cli.writes]
-        self.assertEqual(len(dates), 3, dates)       # A, B (killed), C -- no repeat
-        ledger = json.load(open(di.ledger_path(self.args(), "Travel")))
-        self.assertEqual(ledger["done"], {"A" * 32: 100, "B" * 32: 101, "C" * 32: 102})
-        self.assertEqual(ledger["pending"], {})
+        self.assertEqual(len(cli.writes), 3)       # A, B (killed), C -- no repeat
+        led = self.ledger()
+        self.assertEqual(led["done"], {"A" * 32: 100, "B" * 32: 101, "C" * 32: 102})
+        self.assertEqual(led["pending"], {})
 
     def test_pending_write_that_never_landed_is_retried(self):
         cli = FakeCLI(die_on_write=1)
@@ -332,6 +370,77 @@ class ImportTests(Tmp):
         cli.writes.clear()
         self.run_import(cli)
         self.assertEqual(len(cli.writes), 3)
+
+    # Greptile P1: date alone is not identity
+    def test_resume_does_not_claim_an_unrelated_entry_at_the_same_time(self):
+        cli = FakeCLI(die_on_write=2)
+        # B's wall clock as the import will pass it (entries with no zone use UTC)
+        when = datetime.datetime.fromtimestamp(
+            1700003600, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        # Same instant and content, but already in the store before this run:
+        # below the run's floor, so not it.
+        cli.add(when, "Second", "body two", pk=50)
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_import(cli)
+        cli.die_on_write = None
+        self.assertEqual(cli.writes[1][cli.writes[1].index("--date") + 1], when)
+        # Same instant, different content, newer than the floor: not it either.
+        other = cli.add(when, "Someone else's entry", "written by hand")
+        self.run_import(cli)
+        led = self.ledger()
+        self.assertEqual(len(cli.writes), 4, "B should be written again")
+        self.assertNotIn(led["done"]["B" * 32], (50, other))
+
+    # Greptile P1: a timezone change between the kill and the resume
+    def test_resume_after_a_timezone_change_does_not_duplicate(self):
+        cli = FakeCLI(die_on_write=2)
+        self.kill_second_write_after_it_lands(cli)
+        set_tz("Asia/Tokyo")                       # list now prints other wall clocks
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 3, "the landed entry was written twice")
+        self.assertEqual(self.ledger()["done"]["B" * 32], 101)
+
+    # Greptile P1: $JOURNAL_DB picks the store when --target-db is absent
+    def test_journal_db_sandbox_gets_its_own_ledger(self):
+        sandbox = self.p("env-sandbox.sqlite")
+        os.environ["JOURNAL_DB"] = sandbox
+        self.assertEqual(di._target_id(None), os.path.realpath(sandbox))
+        self.assertFalse(di.is_live(None))
+        cli = FakeCLI()
+        self.run_import(cli)
+        self.assertNotIn("--live", cli.writes[0])
+        led_path = di.ledger_path(self.args(), "Travel")
+        self.assertIn(".sandbox-", os.path.basename(led_path))
+        os.environ.pop("JOURNAL_DB")
+        self.assertNotEqual(di.ledger_path(self.args(), "Travel"), led_path)
+        # ...and a $JOURNAL_DB that is the real store is live.
+        os.environ["JOURNAL_DB"] = di.REAL_STORE
+        self.assertTrue(di.is_live(None))
+
+    # Greptile P1: a nonzero exit after the commit must not lose the record
+    def test_nonzero_exit_after_commit_is_recorded_as_done(self):
+        cli = FakeCLI(fail_after_commit=2)
+        self.run_import(cli)
+        led = self.ledger()
+        self.assertEqual(led["done"]["B" * 32], 101)
+        self.assertNotIn("B" * 32, led["failed"])
+        self.assertEqual(led["pending"], {})
+        self.run_import(cli)                       # a re-run writes nothing more
+        self.assertEqual(len(cli.writes), 3)
+
+    def test_nonzero_exit_that_did_not_land_is_a_failure(self):
+        cli = FakeCLI()
+
+        def failing(cmd, *a, **kw):
+            if "write" in cmd and "--dry-run" not in cmd and "Second" in cmd:
+                cli.writes.append(cmd)
+                return subprocess.CompletedProcess(cmd, 1, "", "boom")
+            return cli(cmd, *a, **kw)
+        self.run_import(failing)
+        led = self.ledger()
+        self.assertIn("B" * 32, led["failed"])
+        self.assertEqual(led["pending"], {})
+        self.assertNotIn("B" * 32, led["done"])
 
     def test_rehearsal_and_live_keep_separate_ledgers(self):
         sandbox = self.p("sandbox", "moments.sqlite")

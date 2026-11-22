@@ -15,7 +15,7 @@ hours -- sometimes a whole day -- off. Day One's SQLite store still has the
 original zone per entry, so this reads that directly and uses the export
 folder only as a source of image bytes.
 """
-import os, re, sys, json, shutil, sqlite3, hashlib, argparse, collections, subprocess, datetime
+import os, re, sys, json, time, shutil, sqlite3, hashlib, argparse, collections, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dayone, exifgps, photoslib
@@ -79,10 +79,26 @@ def publish_state(path):
 
 # --------------------------------------------------------------- helpers
 
+REAL_STORE = os.path.expanduser(
+    "~/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite")
+
+
 def _target_id(target_db):
-    """What a ledger's primary keys belong to: the real store, or one sandbox."""
-    return "live" if not target_db else os.path.realpath(
-        os.path.expanduser(target_db))
+    """What a ledger's primary keys belong to: the real store, or one sandbox.
+
+    Resolved the way journal-cli resolves its store: --target-db (passed as
+    --db), else $JOURNAL_DB, else the real store. A $JOURNAL_DB sandbox is a
+    sandbox, and a path that resolves to the real store is live.
+    """
+    db = target_db or os.environ.get("JOURNAL_DB")
+    if not db:
+        return "live"
+    real = os.path.realpath(os.path.expanduser(db))
+    return "live" if real == os.path.realpath(REAL_STORE) else real
+
+
+def is_live(target_db):
+    return _target_id(target_db) == "live"
 
 
 def ledger_path(args, journal_name):
@@ -226,50 +242,102 @@ def cmd_plan(args):
         print("\nmanifest -> %s" % args.json)
 
 
-def _list_dates(cli, target_db):
-    """[(id, date, title)] for every entry in the destination store."""
+def _wall_epoch(stamp):
+    """A "YYYY-MM-DD HH:MM:SS" wall clock in this Mac's zone -> unix seconds.
+
+    journal-cli reads --date that way and `list` prints dates that way, so
+    comparing epochs (not strings) survives a timezone change between a write
+    and the run that reconciles it.
+    """
+    try:
+        return int(time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _fingerprint(title, text):
+    """A short hash of an entry's visible title and text."""
+    raw = "%s\x00%s" % ((title or "").strip(), (text or "").strip())
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _expected_fingerprint(cli, title_md, body_md):
+    """What `list --full` will show for this write, via journal-cli's renderer."""
+    title = _render(cli, title_md, inline=True) if title_md else b""
+    text = _render(cli, body_md, plain=True) if body_md else b""
+    if title is None or text is None:
+        return None
+    return _fingerprint(title.decode("utf-8", "replace"),
+                        text.decode("utf-8", "replace"))
+
+
+def _destination_rows(cli, target_db):
+    """[{id, epoch, fp}] for every entry in the destination store."""
     cmd = [cli] + (["--db", target_db] if target_db else []) + [
-        "list", "--limit", "1000000", "--include-empty", "--json"]
+        "list", "--limit", "1000000", "--include-empty", "--full", "--json"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         die("could not list destination entries to reconcile the ledger: %s"
             % (r.stderr or r.stdout).strip())
-    return [(x["id"], x.get("date"), x.get("title") or "")
+    return [{"id": x["id"], "epoch": _wall_epoch(x.get("date")),
+             "fp": _fingerprint(x.get("title"), x.get("text"))}
             for x in json.loads(r.stdout)]
 
 
-def reconcile_pending(args, state, state_path, entries):
+def _landed(info, rows, claimed):
+    """Destination entries that are this pending write, by identity.
+
+    Only an entry created after the write was queued (id above its floor),
+    not already claimed by another Day One entry, at the same instant, and
+    with the same rendered title and text counts. Date alone is not identity.
+    """
+    floor = info.get("floor_pk", 0)
+    epoch = info.get("epoch")
+    if epoch is None:
+        epoch = _wall_epoch(info.get("date"))
+    fp = info.get("fp")
+    return [r for r in rows
+            if r["id"] > floor and r["id"] not in claimed
+            and r["epoch"] is not None and r["epoch"] == epoch
+            and (fp is None or r["fp"] == fp)]
+
+
+def _settle(uuid, info, rows, claimed, state, state_path):
+    """Record a pending write as done if it landed; True if it did."""
+    hits = _landed(info, rows, claimed)
+    if len(hits) > 1:
+        die("cannot tell which of entries %s is Day One entry %s (an "
+            "interrupted write). Check them in Journal, then record the "
+            "right one in %s under \"done\" and remove it from \"pending\"."
+            % (", ".join(str(h["id"]) for h in hits), uuid, state_path))
+    state["pending"].pop(uuid, None)
+    if hits:
+        state["done"][uuid] = hits[0]["id"]
+        claimed.add(hits[0]["id"])
+        return True
+    return False
+
+
+def _claimed(state):
+    return {v for v in state["done"].values() if type(v) is int}
+
+
+def reconcile_pending(args, state, state_path, rows):
     """Settle writes that were in flight when a previous run stopped.
 
     Each write is marked pending in the ledger before journal-cli runs and
     moved to done right after it succeeds. A pending mark left behind means
     the run stopped in between, so the entry may or may not have landed.
-    Look for it in the destination by its exact date before deciding.
     """
-    pending = state["pending"]
-    if not pending:
+    if not state["pending"]:
         return
-    by_uuid = {e["uuid"]: e for e in entries}
-    claimed = {v for v in state["done"].values() if type(v) is int}
-    rows = _list_dates(args.cli, args.target_db)
-    for uuid, info in list(pending.items()):
-        e = by_uuid.get(uuid)
-        hits = [r for r in rows if r[1] == info.get("date") and r[0] not in claimed]
-        if len(hits) > 1 and e is not None:
-            want = dayone.markdown_to_inline_text(e.get("title") or "") or ""
-            hits = [r for r in hits if r[2] == want] or hits
-        if len(hits) == 1:
-            state["done"][uuid] = hits[0][0]
-            claimed.add(hits[0][0])
-            print("reconciled: %s already landed as entry %d" % (uuid, hits[0][0]))
-        elif hits:
-            die("cannot tell which of entries %s is Day One entry %s (an "
-                "interrupted write). Check them in Journal, then record the "
-                "right one in %s under \"done\" and remove it from \"pending\"."
-                % (", ".join(str(h[0]) for h in hits), uuid, state_path))
+    claimed = _claimed(state)
+    for uuid, info in list(state["pending"].items()):
+        if _settle(uuid, info, rows, claimed, state, state_path):
+            print("reconciled: %s already landed as entry %d"
+                  % (uuid, state["done"][uuid]))
         else:
             print("reconciled: %s never landed; it will be written" % uuid)
-        del pending[uuid]
     save_state(state_path, state)
 
 
@@ -278,6 +346,7 @@ def cmd_import(args):
     target = args.into or j["name"]
     state_path = ledger_path(args, j["name"])
     state = load_state(state_path, j["name"], args.target_db)
+    floor_pk = 0
     if not args.dry_run:
         # Prove the ledger can be written before touching the destination:
         # a write the ledger cannot record is a write a re-run repeats.
@@ -285,7 +354,10 @@ def cmd_import(args):
             save_state(state_path, state)
         except OSError as e:
             die("cannot write the import ledger %s: %s" % (state_path, e))
-        reconcile_pending(args, state, state_path, entries)
+        rows = _destination_rows(args.cli, args.target_db)
+        reconcile_pending(args, state, state_path, rows)
+        # Anything this run creates gets an id above this.
+        floor_pk = max([r["id"] for r in rows] or [0])
 
     todo = [e for e in entries if has_content(e)
             and e["uuid"] not in state["done"]]
@@ -306,7 +378,7 @@ def cmd_import(args):
             die("%s does not support --location-presentation %s (needs journal-cli 1.3.0+)"
                 % (args.cli, args.location_presentation))
 
-    live = not args.target_db
+    live = is_live(args.target_db)
     print("Day One '%s' -> Apple Journal '%s'" % (j["name"], target))
     print("%d to write, %d already done, %d empty/skipped%s"
           % (len(todo), len(state["done"]), len(skipped),
@@ -360,16 +432,30 @@ def cmd_import(args):
         if not args.dry_run:
             # Marked before the write, cleared right after it: if the run
             # dies in between, the next run reconciles instead of guessing.
-            state["pending"][e["uuid"]] = {"date": when}
+            # The record carries what identifies the entry once it lands.
+            state["pending"][e["uuid"]] = {
+                "date": when, "epoch": _wall_epoch(when), "floor_pk": floor_pk,
+                "fp": _expected_fingerprint(args.cli, title_md, body_md)}
             save_state(state_path, state)
         r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 and not args.dry_run:
+            # A nonzero exit is not proof nothing landed: journal-cli can be
+            # killed after its commit. Check before calling it a failure.
+            info = state["pending"][e["uuid"]]
+            rows = _destination_rows(args.cli, args.target_db)
+            if _settle(e["uuid"], info, rows, _claimed(state), state, state_path):
+                state["failed"].pop(e["uuid"], None)
+                save_state(state_path, state)
+                sys.stderr.write("          journal-cli exited %d, but entry %d "
+                                 "landed; recorded it\n"
+                                 % (r.returncode, state["done"][e["uuid"]]))
+                ok += 1
+                continue
         if r.returncode != 0:
             fail += 1
             err = (r.stderr or r.stdout).strip().split("\n")[-1]
             sys.stderr.write("          FAILED: %s\n" % err)
             if not args.dry_run:
-                # journal-cli rolls a failed write back, so nothing landed.
-                state["pending"].pop(e["uuid"], None)
                 state["failed"][e["uuid"]] = err
                 save_state(state_path, state)
             if fail >= args.max_failures:
@@ -567,7 +653,7 @@ def _fix_locations(args, entries, state, con):
         return
 
     ok = 0
-    prune = bool(args.prune_backups) and not args.target_db
+    prune = bool(args.prune_backups) and is_live(args.target_db)
     backups_before = set(_backup_dirs()) if prune else set()
     for n, (e, pk, got, off, place, city) in enumerate(fixes, 1):
         cmd = [args.cli]
@@ -762,7 +848,7 @@ def cmd_fix_text(args):
     ok = fail = 0
     # Gate on the option, not on whether the keep set happens to be non-empty:
     # a first run against an empty ~/Backups would otherwise skip pruning.
-    prune = bool(args.prune_backups) and not args.target_db
+    prune = bool(args.prune_backups) and is_live(args.target_db)
     backups_before = set(_backup_dirs()) if prune else set()
     for n, (e, pk) in enumerate(todo, 1):
         cmd = [args.cli]
