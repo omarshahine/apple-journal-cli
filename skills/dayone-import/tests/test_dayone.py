@@ -233,6 +233,30 @@ class TextTests(Tmp):
         self.assertIn(pdf, gone)
         self.assertTrue(any("weird" in g.lower() for g in gone), gone)
 
+    def test_fix_export_flags_unresolved_references_without_crashing(self):
+        # A reference reported by its own text must be matched literally:
+        # "![](...)" compiled as a pattern is an unterminated class.
+        db = self.p("fx.sqlite")
+        pdf = "9" * 32
+        md = ("Notes\nsee ![](dayone-moment:/pdfAttachment/%s) and "
+              "![](dayone-moment:/weird) end" % pdf)
+        make_dayone(db, [(1, "E" * 32, 1700000000, md)])
+        exp = self.p("export")
+        os.makedirs(exp)
+        note = os.path.join(exp, "note.md")
+        with open(note, "w") as fh:
+            fh.write("---\nuuid: %s\n---\n%s\n" % ("E" * 32, md))
+        args = types.SimpleNamespace(db=db, journal="Travel", export=exp,
+                                     rename=False, enrich=False,
+                                     flag_missing=True, backup=None,
+                                     dry_run=False)
+        with redirect_stdout(io.StringIO()):
+            di.cmd_fix_export(args)
+        with open(note) as fh:
+            out = fh.read()
+        self.assertNotIn("dayone-moment", out)
+        self.assertEqual(out.count("*[missing attachment"), 2, out)
+
     def test_longer_fence_keeps_a_shorter_fence_as_content(self):
         md = "````\n```\n---\n````"
         self.assertEqual(dayone.markdown_to_text(md), "```\n---")

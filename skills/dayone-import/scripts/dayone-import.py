@@ -1251,11 +1251,16 @@ def cmd_fix_export(args):
 
         new_body = body
         if args.flag_missing:
-            def replace(uuid, note):
-                pat = re.compile(
-                    r"!\[\]\(dayone-moment:/*(?:audio/|video/)?%s\)" % uuid,
-                    re.I)
-                return pat.subn(note, new_body)
+            def replace(ref, note):
+                # A 32-hex id matches its reference in any form (photo,
+                # audio, video, pdfAttachment, ...). Anything else is a
+                # reference reported by its own text (read_entries upper-cases
+                # it), matched literally -- never compiled as a pattern.
+                if re.fullmatch(r"[0-9A-Fa-f]{32}", ref):
+                    pat = re.compile(r"!\[\]\(dayone-moment:[^)\s]*?%s\)" % ref, re.I)
+                else:
+                    pat = re.compile(re.escape(ref), re.I)
+                return pat.subn(lambda m: note, new_body)
 
             for miss in e["missing"]:
                 new_body, n = replace(
