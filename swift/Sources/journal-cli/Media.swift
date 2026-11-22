@@ -65,9 +65,10 @@ func photosLookup(_ path: String) -> String? {
     }
     guard FileManager.default.fileExists(atPath: PHOTOS_DB) else { return nil }
     var h: OpaquePointer?
-    guard sqlite3_open_v2(PHOTOS_DB, &h,
-                          SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let h = h else { return nil }
-    defer { sqlite3_close(h) }
+    let rc = sqlite3_open_v2(PHOTOS_DB, &h, SQLITE_OPEN_READONLY, nil)
+    // A failed open can still allocate a handle, which must be closed too.
+    defer { if let h = h { sqlite3_close(h) } }
+    guard rc == SQLITE_OK, let h = h else { return nil }
     var stmt: OpaquePointer?
     let sql = """
         select a.ZUUID, aa.ZORIGINALFILESIZE from ZASSET a
@@ -96,12 +97,26 @@ import SQLite3
 
 // ---------------------------------------------------------------- links
 
-/// base64 NSKeyedArchiver LPLinkMetadata, the format Journal's link assets use.
-func makeLinkPayload(_ urlString: String, title: String?) -> String {
+/// Input checks shared by the real write and --dry-run, so a rehearsal that
+/// passes means the input is acceptable.
+func checkLinkURL(_ urlString: String) {
     guard let u = URL(string: urlString),
           let scheme = u.scheme, ["http", "https"].contains(scheme), u.host != nil else {
         die("--link needs an absolute http(s) URL, got '\(urlString)'")
     }
+}
+
+func checkMediaType(_ path: String) {
+    let e = ext(path)
+    guard PHOTO_EXT.contains(e) || VIDEO_EXT.contains(e) else {
+        die("unsupported media type '.\(e)' (\(path))")
+    }
+}
+
+/// base64 NSKeyedArchiver LPLinkMetadata, the format Journal's link assets use.
+func makeLinkPayload(_ urlString: String, title: String?) -> String {
+    checkLinkURL(urlString)
+    guard let u = URL(string: urlString) else { die("--link needs an absolute http(s) URL") }
     let md = LPLinkMetadata()
     md.originalURL = u
     md.url = u

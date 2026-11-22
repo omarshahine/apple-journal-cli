@@ -66,9 +66,6 @@ journal-cli list --limit 20 --full            # --full prints bodies
 journal-cli list --since 2025-01-01 --until 2025-12-31
 journal-cli show 95                           # entry + assets + attachment paths
 journal-cli search tokyo
-journal-cli write --body "Ran a 5K" --journal Fitness --add-journal Mindset --live
-journal-cli edit 42 --add-journal Leisure --live      # keeps existing memberships
-journal-cli edit 42 --remove-journal Leisure --live
 journal-cli export --dir ~/journal-export     # one .md per entry, YAML frontmatter
 journal-cli export --dir ~/export --format json
 journal-cli stats                             # counts, words, by-year histogram
@@ -129,6 +126,9 @@ journal-cli edit 103 --live --add-media c.heic --add-link https://example.org
 journal-cli edit 103 --live --remove-media 700                     # ids shown by `show`
 journal-cli edit 103 --live --clear-location --no-bookmark
 journal-cli edit 103 --live --journal "Travel"                     # stage an imported entry
+journal-cli write --body "Ran a 5K" --journal Fitness --add-journal Mindset --live
+journal-cli edit 42 --add-journal Leisure --live      # keeps existing memberships
+journal-cli edit 42 --remove-journal Leisure --live
 ```
 
 ### Repairing
@@ -337,7 +337,7 @@ journal-cli repair-locations --to large --live    # or as large ones
 ## Development
 
 ```sh
-cd swift && swift build            # debug build
+(cd swift && swift build)          # debug build; the subshell keeps you at the repo root
 tests/test_write.sh                # full suite against a store copy
 ```
 

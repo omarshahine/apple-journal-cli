@@ -51,7 +51,11 @@ journal-cli write --live --live-photo IMG.heic IMG.mov # image+video pair
 journal-cli write --live --lat N --lon N --place P --city C
 journal-cli write --live --link URL --link-title T
 journal-cli write --live --journal "Name" ...          # Mac-local staging journal (repeat for several)
-journal-cli edit <id> --live [same flags; --add-media/--add-link/--remove-media ID/--clear-location/--journal N]
+journal-cli edit <id> --live [--title T] [--body B | --body-file F | --body-rtf F] [--markdown]
+    [--date D] [--bookmark | --no-bookmark] [--add-media PATH...] [--no-resize] [--photos-link]
+    [--add-link URL [--link-title T]] [--lat N --lon N [--place P] [--city C]] [--clear-location]
+    [--remove-media ID... | --remove-all-media] [--journal N]... [--force]
+    # edit cannot attach a Live Photo (--live-photo is write-only)
 journal-cli edit <id> --live --add-journal "Name"      # keep other memberships; --remove-journal drops one
 journal-cli sync-journals --journal "Name"             # audit and show native finalization steps
 journal-cli delete <id> --live                         # soft; syncs properly

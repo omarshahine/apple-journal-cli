@@ -91,6 +91,10 @@ func parseDate(_ s: String) -> Date {
 
 // ---------------------------------------------------------------- arg scanning
 
+/// Stands in for a global option taken out of argv: ends a list option's
+/// values, and is otherwise ignored.
+let ARG_BOUNDARY = "\u{0}boundary"
+
 struct Args {
     var positional: [String] = []
     private var flags: [String: [String]] = [:]
@@ -102,8 +106,9 @@ struct Args {
         while i < raw.count {
             let a = raw[i]
             if a == "--" {                       // end of options: the rest is positional
-                positional.append(contentsOf: raw[(i + 1)...]); break
+                positional.append(contentsOf: raw[(i + 1)...].filter { $0 != ARG_BOUNDARY }); break
             }
+            if a == ARG_BOUNDARY { i += 1; continue }
             if boolFlags.contains(a) {
                 present.insert(a)
             } else if valueFlags.contains(a) {
@@ -112,7 +117,7 @@ struct Args {
             } else if listFlags.contains(a) {
                 present.insert(a)
                 var vals: [String] = []
-                while i + 1 < raw.count && !raw[i + 1].hasPrefix("--") {
+                while i + 1 < raw.count && !raw[i + 1].hasPrefix("--") && raw[i + 1] != ARG_BOUNDARY {
                     vals.append(raw[i + 1]); i += 1
                 }
                 if vals.isEmpty { die("\(a) needs at least one value") }
