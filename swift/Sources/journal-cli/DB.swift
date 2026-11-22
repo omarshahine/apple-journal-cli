@@ -57,7 +57,12 @@ final class DB {
                 switch sqlite3_column_type(stmt, i) {
                 case SQLITE_INTEGER: row[name] = sqlite3_column_int64(stmt, i)
                 case SQLITE_FLOAT:   row[name] = sqlite3_column_double(stmt, i)
-                case SQLITE_TEXT:    row[name] = String(cString: sqlite3_column_text(stmt, i))
+                case SQLITE_TEXT:
+                    // By byte count, not to the first NUL, so embedded U+0000 survives.
+                    let n = Int(sqlite3_column_bytes(stmt, i))
+                    if let p = sqlite3_column_text(stmt, i) {
+                        row[name] = String(decoding: UnsafeBufferPointer(start: p, count: n), as: UTF8.self)
+                    } else { row[name] = "" }
                 case SQLITE_BLOB:
                     if let p = sqlite3_column_blob(stmt, i) {
                         row[name] = Data(bytes: p, count: Int(sqlite3_column_bytes(stmt, i)))
@@ -88,7 +93,14 @@ final class DB {
             case let v as Int:      sqlite3_bind_int64(stmt, idx, Int64(v))
             case let v as Int64:    sqlite3_bind_int64(stmt, idx, v)
             case let v as Double:   sqlite3_bind_double(stmt, idx, v)
-            case let v as String:   sqlite3_bind_text(stmt, idx, v, -1, SQLITE_TRANSIENT)
+            case let v as String:
+                // Explicit byte length: -1 would stop at an embedded U+0000.
+                let bytes = Array(v.utf8)
+                _ = bytes.withUnsafeBufferPointer { buf in
+                    buf.baseAddress!.withMemoryRebound(to: CChar.self, capacity: max(bytes.count, 1)) {
+                        sqlite3_bind_text(stmt, idx, $0, Int32(bytes.count), SQLITE_TRANSIENT)
+                    }
+                }
             case let v as Data:
                 _ = v.withUnsafeBytes { sqlite3_bind_blob(stmt, idx, $0.baseAddress, Int32(v.count), SQLITE_TRANSIENT) }
             default: die("unbindable parameter \(String(describing: p))")

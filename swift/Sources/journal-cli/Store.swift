@@ -166,10 +166,20 @@ func ensureRiskAccepted(acceptFlag: Bool) {
         + "  Re-run with --accept-risk (agents: ask the user before passing this).")
 }
 
+/// Whether two paths are the same database file. Paths alone are not enough:
+/// a hard link to the real store has its own path, and treating it as a
+/// sandbox would skip --live, the risk check, the app check and the backup.
+func sameStore(_ a: String, _ b: String) -> Bool {
+    func canon(_ p: String) -> String { URL(fileURLWithPath: p).resolvingSymlinksInPath().path }
+    if canon(a) == canon(b) { return true }
+    var sa = stat(), sb = stat()
+    guard stat(a, &sa) == 0, stat(b, &sb) == 0 else { return false }
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino
+}
+
 /// Read-write against the target store, with the real-store guards.
 func withLive<T>(allowLiveDefault: Bool, acceptRisk: Bool = false, _ body: (DB) -> T) -> T {
-    let isDefault = (URL(fileURLWithPath: DB_PATH).resolvingSymlinksInPath().path
-                     == URL(fileURLWithPath: DEFAULT_DB).resolvingSymlinksInPath().path)
+    let isDefault = sameStore(DB_PATH, DEFAULT_DB)
     if isDefault {
         if !allowLiveDefault {
             die("refusing to modify the real Journal store without --live.\n"

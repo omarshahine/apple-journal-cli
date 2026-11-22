@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: second review pass, CLI
+
+- **A hard link to the real store is the real store.** The live-store check
+  compared paths, so `--db` pointed at a hard link skipped `--live`, the risk
+  acknowledgment, the Journal.app check and the backup. Both implementations
+  now compare file identity.
+- **Fenced code keeps its blank lines** and whitespace-only lines in
+  `--markdown` rendering; only prose blank lines are collapsed.
+- **Animated GIFs are stored unchanged.** Resizing an oversized one kept only
+  its first frame.
+- **Text with an embedded NUL character** is bound and read by byte length
+  instead of being cut off at the NUL.
+
 ## 1.4.7
 
 ### Fixed: dayone-import legacy ledger identity
