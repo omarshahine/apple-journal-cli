@@ -172,7 +172,8 @@ _HEADING = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
 _RULE = re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$")
 _BOLD_ITALIC = re.compile(r"(\*{1,3}|_{1,3})(\S(?:.*?\S)?)\1", re.S)
 _LINK = re.compile(r'\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
-_CODE_FENCE = re.compile(r"(?m)^[ \t]*```[^\n]*$")
+_FENCE_OPEN = re.compile(r"[ \t]*(`{3,})[^`\n]*")
+_FENCE_CLOSE = re.compile(r"[ \t]*(`{3,})[ \t]*")
 _TITLE_HEADING = re.compile(r"^#{1,6}[ \t]+")
 
 
@@ -211,14 +212,26 @@ def markdown_to_text(md):
     """
     if not md:
         return md
-    chunks, cur, in_fence = [], [], False      # (is_code, text) runs
+    # A fence opens with three or more backticks (plus an optional info
+    # string) and closes only on a bare run at least as long, so a shorter
+    # "```" inside a "````" block is content -- the same rule as journal-cli's
+    # renderer.
+    chunks, cur, fence = [], [], 0             # fence: opening run, 0 = prose
     for line in md.split("\n"):
-        if _CODE_FENCE.fullmatch(line):
-            chunks.append((in_fence, "\n".join(cur)))
-            cur, in_fence = [], not in_fence
-            continue
+        if fence:
+            m = _FENCE_CLOSE.fullmatch(line)
+            if m and len(m.group(1)) >= fence:
+                chunks.append((True, "\n".join(cur)))
+                cur, fence = [], 0
+                continue
+        else:
+            m = _FENCE_OPEN.fullmatch(line)
+            if m:
+                chunks.append((False, "\n".join(cur)))
+                cur, fence = [], len(m.group(1))
+                continue
         cur.append(line)
-    chunks.append((in_fence, "\n".join(cur)))
+    chunks.append((bool(fence), "\n".join(cur)))
     out = []
     for is_code, text in chunks:
         if not is_code:
