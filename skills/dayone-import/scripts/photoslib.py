@@ -6,9 +6,13 @@ the coordinates the camera recorded, Apple's reverse-geocoded place names,
 and the asset's local identifier (so a Journal entry can point back at the
 real photo).
 
-Read-only: the library database is copied before any query.
+Read-only: queries run against a private snapshot of the library database
+taken with SQLite's online backup API; closing the connection removes it.
 """
-import os, re, shutil, sqlite3, plistlib, tempfile, datetime
+import os, re, sys, sqlite3, plistlib, datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dayone import snapshot_connect
 
 CD_EPOCH = 978307200
 DEFAULT_LIB = os.path.expanduser("~/Pictures/Photos Library.photoslibrary")
@@ -23,20 +27,20 @@ def find_library():
 
 
 def connect(library=None):
+    """A snapshot connection to the Photos library, or None if there is none
+    or it cannot be read. Close it when done (or use it in a `with`)."""
     lib = library or find_library()
     if not lib:
         return None
     src = os.path.join(lib, "database", "Photos.sqlite")
     if not os.path.exists(src):
         return None
-    tmp = tempfile.mkdtemp(prefix="photoslib-")
-    dst = os.path.join(tmp, "Photos.sqlite")
-    for suffix in ("", "-wal", "-shm"):
-        if os.path.exists(src + suffix):
-            shutil.copy2(src + suffix, dst + suffix)
-    con = sqlite3.connect("file:%s?mode=ro" % dst, uri=True)
-    con.row_factory = sqlite3.Row
-    return con
+    try:
+        return snapshot_connect(src, prefix="photoslib-")
+    except (sqlite3.Error, OSError) as e:
+        sys.stderr.write("note: could not read the Photos library at %s (%s)\n"
+                         % (lib, e))
+        return None
 
 
 def _deref(objs, ref):
@@ -94,7 +98,10 @@ def match(con, wall, lat, lon, seconds=120, meters=300):
     if con is None or lat is None or lon is None or not wall:
         return None
     import math
-    dt = datetime.datetime.strptime(wall, "%Y-%m-%d %H:%M:%S")
+    try:
+        dt = datetime.datetime.strptime(wall, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None             # e.g. a camera's "0000:00:00 00:00:00"
     target = dt.replace(tzinfo=datetime.timezone.utc).timestamp() - CD_EPOCH
     dlat = meters / 111_000.0
     dlon = meters / (111_000.0 * max(0.05, math.cos(math.radians(lat))))

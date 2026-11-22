@@ -35,8 +35,11 @@ so this reads that directly.
 
 The store is unencrypted at
 `~/Library/Group Containers/5U8NS4GX82.dayoneapp2/Data/Documents/DayOne.sqlite`.
-It is **copied to a temp file before every read**, so Day One can stay open
-and is never written to.
+Every read works from a **private snapshot** taken with SQLite's online
+backup API (a read-only source connection, one read transaction), so Day One
+can stay open, is never written to, and a checkpoint mid-copy cannot leave
+the snapshot half old, half new. The snapshot is deleted when the command is
+done with it. The Photos library is read the same way.
 
 ## Media is the usual blocker — check `plan` first
 
@@ -84,7 +87,9 @@ python3 $S import "Photography" --into "Day One - Photography" \
 journal-cli --db "$DB" journals --json      # verify counts, then spot-check
 ```
 
-Then replay the identical command without `--target-db`.
+Then replay the identical command without `--target-db`. The rehearsal keeps
+its own ledger (keyed by the sandbox path), so the live run starts fresh
+instead of skipping everything the rehearsal wrote.
 
 `--location-presentation` sets the size of the imported location card:
 `small` (the default) is the compact map, `large` the expanded one. There is
@@ -114,9 +119,31 @@ other devices. `sync-journals` is a read-only audit and instruction command.
 - **The staging journal must already exist** in Journal.app. Give it a name
   distinct from the final journal, for example `Day One - Photography`.
 - **Quit Journal.app** before a live run; `journal-cli` refuses while it runs.
-- **Resumable.** Progress is kept in an import ledger keyed by Day One UUID,
-  so a re-run skips what already landed and never double-writes. Delete the
-  ledger to force a full re-import.
+- **Resumable.** Progress is kept in an import ledger keyed by Day One UUID.
+  Each write is marked *pending* before journal-cli runs and recorded as done
+  (written and fsynced) the moment it succeeds, so a re-run skips what landed.
+  If a run is killed mid-write, or journal-cli exits nonzero (it can be killed
+  after its commit), that entry is reconciled against the destination before
+  anything else happens. It only counts as landed if a destination entry was
+  created during that run (its id is above the highest id when the run
+  started), is not already claimed by another Day One entry, has the same
+  instant (compared as an epoch, so a timezone change between runs does not
+  matter), and has the same rendered title and text. Found, it is recorded;
+  absent, it is written again (or, after a nonzero exit, recorded as failed);
+  ambiguous, the import stops and names the candidates.
+  The ledger is also checked before the first write, so an unwritable ledger
+  stops the import before anything lands. Delete the ledger to force a full
+  re-import.
+
+  There is one ledger per Day One journal **and destination**: the live one is
+  `<journal>.json`, a sandbox rehearsal gets `<journal>.sandbox-<hash>.json`.
+  Each ledger records which journal and destination it belongs to, and
+  `import`, `fix-text` and `fix-locations` refuse a ledger that does not match
+  (pass `--target-db` for a sandbox, or `--state FILE` to choose one). The
+  destination is resolved the way journal-cli resolves it: `--target-db`,
+  else `$JOURNAL_DB`, else the real store, so a `$JOURNAL_DB` sandbox gets a
+  sandbox ledger too. A
+  relative `--state` path is resolved against the current folder.
 
   Nothing can regenerate a ledger, and `fix-text` / `fix-locations` need it
   months later to know which entries are theirs. So the durable copy lives in
@@ -124,7 +151,8 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   cache at `~/.local/state/dayone-import/` (override with
   `$DAYONE_IMPORT_STATE`). The cache is authoritative during a run -- writing
   over the network every few entries would stall a large import -- and is
-  published when the import finishes. A machine with no local copy pulls it
+  published when the import finishes. Only live ledgers are published;
+  rehearsal ledgers stay on this Mac. A machine with no local copy pulls it
   back automatically. If the worker is unreachable the import still runs and
   says the local copy is the only one.
 - **`--prune-backups`** is close to required for big journals. `journal-cli`
@@ -191,8 +219,9 @@ python3 $S fix-locations "Photography" --export ~/export/Photography --dry-run
 python3 $S fix-locations "Photography" --export ~/export/Photography
 ```
 
-It needs the import state file, so run it **after** `import`. Two rules keep
-it from doing harm, both learned the hard way:
+It needs the import state file, so run it **after** `import`. A photo with
+damaged EXIF is skipped (and named), never allowed to stop the audit. Two
+rules keep it from doing harm, both learned the hard way:
 
 - **Anchor on time, not geography.** The entry's location is taken from the
   photo shot closest to the entry's own timestamp, not the geographic centre

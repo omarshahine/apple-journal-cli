@@ -41,15 +41,39 @@ def _ifd(b, base, off, order, want):
 
 
 def read(path, _cap=384 * 1024):
-    """-> {'lat':float,'lon':float,'when':str} for whatever could be read."""
+    """-> {'lat':float,'lon':float,'when':str} for whatever could be read.
+
+    Never raises on a damaged file: truncated or malformed metadata yields
+    whatever fields were readable (possibly none), so one bad photo cannot
+    abort an audit of many.
+    """
     out = {}
     try:
         with open(path, "rb") as fh:
             b = fh.read(_cap)
     except OSError:
         return out
+    try:
+        _parse(b, out)
+    except (struct.error, IndexError, ValueError, OverflowError, ZeroDivisionError):
+        pass
+    if "when" in out and not _valid_when(out["when"]):
+        del out["when"]
+    return out
+
+
+def _valid_when(s):
+    import datetime
+    try:
+        datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        return True
+    except ValueError:
+        return False
+
+
+def _parse(b, out):
     if b[:2] != b"\xff\xd8":
-        return out
+        return
 
     # locate the APP1/Exif segment
     i, app1 = 2, None
@@ -64,15 +88,17 @@ def read(path, _cap=384 * 1024):
             break
         i += 2 + seglen
     if app1 is None:
-        return out
+        return
 
     tiff = b[app1:]
+    if len(tiff) < 8:
+        return
     if tiff[:2] == b"II":
         order = "<"
     elif tiff[:2] == b"MM":
         order = ">"
     else:
-        return out
+        return
     ifd0 = struct.unpack(order + "I", tiff[4:8])[0]
 
     top = _ifd(tiff, 0, ifd0, order, {0x8825, 0x8769})
@@ -90,17 +116,17 @@ def read(path, _cap=384 * 1024):
                     out["when"] = "%s %s" % (s[:10].replace(":", "-"), s[11:19])
 
     if 0x8825 not in top:                               # GPS IFD
-        return out
+        return
     gps_off = struct.unpack(order + "I",
                             tiff[top[0x8825][2]:top[0x8825][2] + 4])[0]
     g = _ifd(tiff, 0, gps_off, order, {0x0001, 0x0002, 0x0003, 0x0004})
     if 0x0002 not in g or 0x0004 not in g:
-        return out
+        return
     try:
         lat = _rational(tiff, g[0x0002][2], order, 3)
         lon = _rational(tiff, g[0x0004][2], order, 3)
     except struct.error:
-        return out
+        return
     lat = lat[0] + lat[1] / 60 + lat[2] / 3600
     lon = lon[0] + lon[1] / 60 + lon[2] / 3600
     if 0x0001 in g and tiff[g[0x0001][2]:g[0x0001][2] + 1] in (b"S",):
@@ -109,7 +135,7 @@ def read(path, _cap=384 * 1024):
         lon = -lon
     if lat or lon:
         out["lat"], out["lon"] = lat, lon
-    return out
+    return
 
 
 if __name__ == "__main__":

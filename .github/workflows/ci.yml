@@ -66,3 +66,13 @@ jobs:
           JOURNAL_SEED: ${{ steps.fixture.outputs.db }}
           JOURNAL_CLI: ${{ github.workspace }}/reference/journal-cli.py
         run: tests/test_write.sh
+
+  test-dayone-import:
+    name: Test (dayone-import skill)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s skills/dayone-import/tests -v
