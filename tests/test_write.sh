@@ -21,7 +21,7 @@ if [ -z "$DB" ] || [ ! -f "$DB" ]; then
 fi
 ATT="$SB/Attachments"
 pass=0; fail=0
-store_state(){ sqlite3 "$DB" "select (select count(*) from ZJOURNALENTRYMO), (select group_concat(Z_PK||':'||coalesce(hex(ZASSETORDERING),'')||':'||coalesce(ZUPDATEDDATE,''),',') from ZJOURNALENTRYMO), (select group_concat(Z_PK||':'||ZENTRY||':'||coalesce(ZISHIDDEN,'')||':'||coalesce(ZISSLIM,'')||':'||coalesce(hex(ZASSETMETADATA),''),',') from ZJOURNALENTRYASSETMO), (select count(*) from Z_5JOURNALS);" | shasum | cut -c1-16; }
+store_state(){ sqlite3 "$DB" "select (select count(*) from ZJOURNALENTRYMO), (select group_concat(Z_PK||':'||coalesce(hex(ZASSETORDERING),'')||':'||coalesce(ZUPDATEDDATE,'')||':'||coalesce(ZFLAGGED,'')||':'||coalesce(ZENTRYDATE,''),',') from ZJOURNALENTRYMO), (select group_concat(Z_PK||':'||ZENTRY||':'||coalesce(ZISHIDDEN,'')||':'||coalesce(ZISSLIM,'')||':'||coalesce(hex(ZASSETMETADATA),''),',') from ZJOURNALENTRYASSETMO), (select count(*) from Z_5JOURNALS);" | shasum | cut -c1-16; }
 ok(){ if [ "$2" = "$3" ]; then echo "  PASS  $1"; pass=$((pass+1));
       else echo "  FAIL  $1 (want '$3', got '$2')"; fail=$((fail+1)); fi; }
 jq_(){ python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
@@ -774,6 +774,13 @@ ok "dry-run rejects a bad --date" "$?" "1"
 ok "dry-run rejects an unknown journal" "$?" "1"
 "$CLI" --db "$DB" edit $DPK2 --remove-media 999999 --dry-run >/dev/null 2>&1
 ok "dry-run rejects an unknown asset" "$?" "1"
+"$CLI" --db "$DB" edit $DPK2 --add-link not-a-url --dry-run >/dev/null 2>&1
+ok "dry-run rejects a bad link" "$?" "1"
+printf 'text' > "$SB/notes.txt"
+"$CLI" --db "$DB" edit $DPK2 --add-media "$SB/notes.txt" --dry-run >/dev/null 2>&1
+ok "dry-run rejects an unsupported media file" "$?" "1"
+"$CLI" --db "$DB" write --body x --link not-a-url --dry-run >/dev/null 2>&1
+ok "write dry-run rejects a bad link" "$?" "1"
 sqlite3 "$DB" "update ZJOURNALENTRYMO set ZMERGEABLEATTRIBUTES=x'6372647407000000' where Z_PK=$DPK2;"
 "$CLI" --db "$DB" edit $DPK2 --body "x" --dry-run >/dev/null 2>&1
 ok "dry-run rejects a text edit on a CRDT entry" "$?" "1"
@@ -786,6 +793,7 @@ MM0=$(store_state)
 "$CLI" --db "$DB" edit $DPK2 --bookmark --remove-media abc >/dev/null 2>&1
 ok "malformed --remove-media id refused" "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
 ok "malformed id applied nothing" "$(store_state)" "$MM0"
+ok "malformed id left the bookmark alone" "$(sqlite3 "$DB" "select coalesce(ZFLAGGED,0) from ZJOURNALENTRYMO where Z_PK=$DPK2;")" "0"
 
 # Backups are private to their owner.
 BKP="$SB/backups-private"

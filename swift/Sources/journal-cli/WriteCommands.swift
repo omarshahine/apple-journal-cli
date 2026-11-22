@@ -104,6 +104,8 @@ func cmdWrite(_ a: Args) {
     for m in media where !FileManager.default.fileExists(atPath: m) {
         die("media file not found: \(m)")
     }
+    media.forEach(checkMediaType)
+    if let l = a.value("--link") { checkLinkURL(l) }
     var lp: [String]? = nil
     let lpArgs = a.values("--live-photo")
     if !lpArgs.isEmpty {
@@ -265,6 +267,8 @@ func cmdEdit(_ a: Args) {
     for m in media where !FileManager.default.fileExists(atPath: m) {
         die("media file not found: \(m)")
     }
+    media.forEach(checkMediaType)
+    if let l = a.value("--add-link") { checkLinkURL(l) }
     let lat = a.double("--lat"), lon = a.double("--lon")
     let hasLoc = lat != nil || lon != nil
     if hasLoc && (lat == nil || lon == nil) { die("--lat and --lon must be given together") }

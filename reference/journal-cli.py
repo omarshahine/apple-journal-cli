@@ -392,12 +392,21 @@ let data = try NSKeyedArchiver.archivedData(withRootObject: md, requiringSecureC
 print(data.base64EncodedString())
 """
 
-def make_link_payload(url, title=None):
-    """base64 NSKeyedArchiver LPLinkMetadata, the format Journal's link assets use."""
+def check_link_url(url):
+    """Shared by the real write and --dry-run."""
     from urllib.parse import urlparse
     u = urlparse(url)
     if u.scheme not in ("http", "https") or not u.netloc:
         die(f"--link needs an absolute http(s) URL, got {url!r}")
+
+def check_media_type(path):
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in PHOTO_EXT and ext not in VIDEO_EXT:
+        die(f"unsupported media type {ext!r} ({path})")
+
+def make_link_payload(url, title=None):
+    """base64 NSKeyedArchiver LPLinkMetadata, the format Journal's link assets use."""
+    check_link_url(url)
     if not shutil.which("swift"):
         die("writing a link needs the `swift` CLI (Xcode or Command Line Tools)")
     d = tempfile.mkdtemp(prefix="journal-link.")
@@ -922,6 +931,8 @@ def cmd_write(a):
     media = [os.path.abspath(os.path.expanduser(m)) for m in (a.media or [])]
     for m in media:
         if not os.path.exists(m): die(f"media file not found: {m}")
+        check_media_type(m)
+    if a.link: check_link_url(a.link)
     lp = None
     if a.live_photo:
         lp = [os.path.abspath(os.path.expanduser(x)) for x in a.live_photo]
@@ -1097,6 +1108,8 @@ def cmd_edit(a):
     media = [os.path.abspath(os.path.expanduser(m)) for m in (a.add_media or [])]
     for m in media:
         if not os.path.exists(m): die(f"media file not found: {m}")
+        check_media_type(m)
+    if a.add_link: check_link_url(a.add_link)
     has_loc = a.lat is not None or a.lon is not None
     if has_loc and (a.lat is None or a.lon is None):
         die("--lat and --lon must be given together")
