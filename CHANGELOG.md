@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.5.2
 
 ### Fixed
 
-- **Markdown export** percent-encodes `%`, `#` and `?` in attachment links, so
-  a renderer can't read them as URL syntax.
+- **Markdown export** percent-encodes `%`, `#` and `?` in attachment paths, so
+  a renderer can't read them as URL syntax. Web links keep their own query,
+  fragment and escapes.
 - **dayone-import** reads EXIF only from the photo's EXIF segment, not past
   its declared end.
 
