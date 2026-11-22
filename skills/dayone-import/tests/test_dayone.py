@@ -236,6 +236,41 @@ class TextTests(Tmp):
         out = dayone.markdown_to_text("```\n# keep\n\nx\n```")
         self.assertEqual(out, "# keep\n\nx")
 
+    def test_external_image_syntax_is_kept(self):
+        md = ("Title\nSee ![](https://example.com/x.png) and ![](dayone-moment://"
+              + "A" * 32 + ")")
+        e = self.entries(md)[0]
+        self.assertIn("![](https://example.com/x.png)", e["body_md"])
+        self.assertNotIn("dayone-moment", e["body_md"])
+        # Every kind of Day One reference is syntax, a PDF one included.
+        e = self.entries("Title\nnotes\n![](dayone-moment:/pdfAttachment/" + "F" * 32 + ")")[0]
+        self.assertEqual(e["body_md"], "notes")
+
+    def test_fenced_code_keeps_image_literals_and_blank_lines(self):
+        ref = "![](dayone-moment://" + "B" * 32 + ")"
+        md = "Title\n```\n" + ref + "\na\n\n\n\nb\n```"
+        e = self.entries(md)[0]
+        self.assertIn(ref, e["body_md"])
+        self.assertIn("a\n\n\n\nb", e["body_md"])
+        self.assertIn(ref, e["body"])
+
+    def test_escaped_moment_reference_is_text(self):
+        md = "Title\n\\![](dayone-moment://" + "C" * 32 + ")"
+        e = self.entries(md)[0]
+        self.assertIn("dayone-moment", e["body_md"])
+
+    def test_entry_opening_with_a_fence_has_no_title(self):
+        e = self.entries("```\ncode here\n```")[0]
+        self.assertIsNone(e["title"])
+        self.assertTrue(e["body_md"].startswith("```"), e["body_md"])
+        self.assertEqual(e["body"], "code here")
+
+    def test_hex_title_that_is_not_the_entry_uuid_is_kept(self):
+        e = self.entries("ab" * 16 + "\nbody")[0]      # the entry's UUID is E*32
+        self.assertEqual(e["title"], "ab" * 16)
+        e = self.entries("E" * 32 + "\nbody")[0]
+        self.assertIsNone(e["title"])
+
     def test_literal_leading_hash_title_is_kept(self):
         self.assertEqual(self.entries("#travel\nTrip notes")[0]["title"], "#travel")
         self.assertEqual(self.entries("#\nbody")[0]["title"], "#")
@@ -621,6 +656,59 @@ class ImportTests(Tmp):
     def test_a_rule_only_body_is_no_text_to_compare(self):
         e = {"title": "Post office", "title_md": "Post office", "body": "", "body_md": "---"}
         self.assertTrue(di._same_content({"title": "Post office", "text": ""}, e))
+
+    def test_mappings_under_different_zones_are_refused(self):
+        # One mapping fits only Los Angeles, the other only Tokyo: no single
+        # import zone explains the ledger.
+        def at(stamp, zone):
+            n = datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+            return int(n.replace(tzinfo=zoneinfo.ZoneInfo(zone)).timestamp())
+        e1 = {"local": "2023-03-01 09:00:00", "utc": None}
+        e2 = {"local": "2023-03-02 09:00:00", "utc": None}
+        pairs = [(e1, {"epoch": at(e1["local"], "America/Los_Angeles")}),
+                 (e2, {"epoch": at(e2["local"], "Asia/Tokyo")})]
+        self.assertEqual(di._import_zones(pairs), [])
+
+    def test_ledger_split_across_zones_is_refused_by_import(self):
+        self._legacy_ledger({"A" * 32: 100, "B" * 32: 101})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "First", "body one", pk=100)
+        cli.add(self._local_date("B" * 32), "Second", "body two", pk=101)
+        nb = datetime.datetime.strptime(self._local_date("B" * 32), "%Y-%m-%d %H:%M:%S")
+        cli.store[-1]["epoch"] = int(nb.replace(
+            tzinfo=zoneinfo.ZoneInfo("Asia/Tokyo")).timestamp())
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
+    def test_state_ledgers_with_one_basename_get_distinct_remote_keys(self):
+        ident_a = {"journal": "Travel", "source": "/a/DayOne.sqlite", "target": "live"}
+        ident_b = {"journal": "Personal", "source": "/a/DayOne.sqlite", "target": "live"}
+        ka = di._remote_key(self.p("travel", "state.json"), ident_a)
+        kb = di._remote_key(self.p("personal", "state.json"), ident_b)
+        self.assertNotEqual(ka, kb)
+        # A default ledger keeps the key earlier versions published under.
+        default = di.ledger_path(self.args(), "Travel")
+        self.assertEqual(di._remote_key(default, ident_a),
+                         di.REMOTE_PREFIX + "/" + os.path.basename(default))
+
+    def test_publish_does_not_overwrite_another_imports_ledger(self):
+        local = self.p("Travel.json")
+        with open(local, "w") as fh:
+            json.dump({"done": {}, "meta": {"journal": "Travel", "target": "live"}}, fh)
+        calls = []
+
+        def remote(args, *extra, **kw):
+            calls.append(args[0])
+            if args[0] == "get":
+                return json.dumps({"done": {"X": 1},
+                                   "meta": {"journal": "Other", "target": "live"}})
+            return "ok"
+        err = io.StringIO()
+        with mock.patch.object(di, "_remote", remote), redirect_stderr(err):
+            di.publish_state(local, {"journal": "Travel", "target": "live"})
+        self.assertNotIn("put", calls)
+        self.assertIn("another import", err.getvalue())
 
     def test_legacy_ledger_survives_a_timezone_change(self):
         # Imported in one zone, verified in another: still the same write.

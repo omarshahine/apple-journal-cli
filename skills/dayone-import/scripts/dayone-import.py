@@ -33,8 +33,28 @@ PLUGIN_DATA = os.path.expanduser("~/.local/bin/plugin-data")
 REMOTE_PREFIX = "journal-cli/dayone-import"
 
 
-def _remote_key(path):
-    return "%s/%s" % (REMOTE_PREFIX, os.path.basename(path))
+def _remote_key(path, ident=None):
+    """Where a ledger lives in plugin-data.
+
+    A default ledger (one this tool names, in STATE_DIR) keeps its original
+    key, the bare filename, so ledgers published by earlier versions are found
+    again. A --state ledger elsewhere is keyed by what it is -- source journal,
+    Day One store and destination -- not by its basename, so two different
+    ledgers both called state.json never share, and overwrite, one key.
+    """
+    base = os.path.basename(path)
+    if ident is None or os.path.dirname(os.path.abspath(path)) == STATE_DIR:
+        return "%s/%s" % (REMOTE_PREFIX, base)
+    digest = hashlib.sha1(json.dumps(
+        [ident.get("journal"), ident.get("source"), ident.get("target")]
+    ).encode("utf-8")).hexdigest()[:12]
+    return "%s/%s.%s.json" % (REMOTE_PREFIX, re.sub(r"\.json$", "", base), digest)
+
+
+def _same_identity(a, b):
+    keys = ("journal", "source", "target")
+    return all(a.get(k) is None or b.get(k) is None or a.get(k) == b.get(k)
+               for k in keys)
 
 
 def _remote(args, *extra, **kw):
@@ -49,29 +69,51 @@ def _remote(args, *extra, **kw):
     return r.stdout if r.returncode == 0 else None
 
 
-def pull_state(path):
+def pull_state(path, ident=None):
     """Seed the local cache from the worker when this machine has no copy."""
     if os.path.exists(path):
         return
-    body = _remote(["get", _remote_key(path)])
+    body = _remote(["get", _remote_key(path, ident)])
     if not body:
         return
     try:
-        json.loads(body)
+        remote = json.loads(body)
     except ValueError:
         return                                  # not our file; leave it alone
+    meta = remote.get("meta") if isinstance(remote, dict) else None
+    if ident and meta and not _same_identity(meta, ident):
+        sys.stderr.write("note: plugin-data ledger %s belongs to another import; "
+                         "not restoring it\n" % _remote_key(path, ident))
+        return
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as fh:
         fh.write(body)
     sys.stderr.write("restored import ledger from plugin-data: %s\n"
-                     % _remote_key(path))
+                     % _remote_key(path, ident))
 
 
-def publish_state(path):
-    """Push the finished ledger to the worker so other machines can see it."""
+def publish_state(path, ident=None):
+    """Push the finished ledger to the worker so other machines can see it.
+
+    Never over another import's ledger: if the remote copy at this key records
+    a different journal, store or destination, keep it and warn instead.
+    """
     if not os.path.exists(path):
         return
-    if _remote(["put", _remote_key(path), path]) is None:
+    key = _remote_key(path, ident)
+    body = _remote(["get", key])
+    if body and ident:
+        try:
+            meta = json.loads(body).get("meta")
+        except (ValueError, AttributeError):
+            meta = None
+        if meta and not _same_identity(meta, ident):
+            sys.stderr.write(
+                "warning: plugin-data key %s holds another import's ledger; not "
+                "overwriting it. The local copy at %s is the only one.\n"
+                % (key, path))
+            return
+    if _remote(["put", key, path]) is None:
         sys.stderr.write(
             "warning: could not publish the import ledger to plugin-data; "
             "the local copy at %s is the only one.\n" % path)
@@ -134,7 +176,7 @@ def load_state(path, journal_name, target_db=None, source_db=None):
     target = _target_id(target_db)
     source = _source_id(source_db)
     if target == "live":
-        pull_state(path)
+        pull_state(path, {"journal": journal_name, "target": target, "source": source})
     if os.path.exists(path):
         with open(path) as fh:
             state = json.load(fh)
@@ -264,11 +306,10 @@ def _wrote_at(epoch, e, mz):
 
 
 def _import_zones(pairs):
-    """The (mode, zone) pairs that best explain these (entry, row) writes.
+    """The (mode, zone) pairs that each explain all of these (entry, row) writes.
 
     Today's zone is tried first: if it explains every write, that is the
-    answer (in each mode that does) and no other zone is scanned. Otherwise
-    every pair that explains the most writes is returned, ties included.
+    answer (in each mode that does) and no other zone is scanned.
     """
     if not pairs:
         return []
@@ -292,15 +333,12 @@ def _import_zones(pairs):
         full = [(m, local) for m in ("local", "utc") if score(m, local) == len(prepared)]
         if full:
             return full
-    best, top = [], 0
-    for mode in ("local", "utc"):
-        for name in names:
-            n = score(mode, name)
-            if n > top:
-                best, top = [(mode, name)], n
-            elif n == top and n:
-                best.append((mode, name))
-    return best
+    # Only a pair that explains EVERY write counts: one import ran under one
+    # (mode, zone). Several such pairs (zones that agree on these dates) are
+    # all kept; none means no single interpretation fits, and the caller
+    # refuses the ledger rather than accept mappings under different zones.
+    return [(mode, name) for mode in ("local", "utc") for name in names
+            if score(mode, name) == len(prepared)]
 
 
 def save_state(path, state):
@@ -679,7 +717,7 @@ def cmd_import(args):
     if not args.dry_run:
         save_state(state_path, state)
         if live:                        # rehearsal ledgers stay on this Mac
-            publish_state(state_path)
+            publish_state(state_path, state.get("meta"))
     if live and args.prune_backups:
         _prune_backups(backups_before)
 
