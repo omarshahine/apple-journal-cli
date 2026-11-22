@@ -222,6 +222,16 @@ class TextTests(Tmp):
         e = self.entries("Title\n```\n---\n```")[0]
         self.assertEqual(e["body"], "---")
 
+    def test_longer_fence_keeps_a_shorter_fence_as_content(self):
+        md = "````\n```\n---\n````"
+        self.assertEqual(dayone.markdown_to_text(md), "```\n---")
+        # A first line of the entry's own UUID is how Day One marks "untitled",
+        # so the body alone must carry the entry.
+        e = self.entries("E" * 32 + "\n" + md)[0]
+        self.assertIsNone(e["title"])
+        self.assertEqual(e["body"], "```\n---")
+        self.assertTrue(di.has_content(e), e)
+
     def test_fenced_content_keeps_blank_lines_and_hashes(self):
         out = dayone.markdown_to_text("```\n# keep\n\nx\n```")
         self.assertEqual(out, "# keep\n\nx")
@@ -464,6 +474,76 @@ class ImportTests(Tmp):
         with self.assertRaises(SystemExit):
             with redirect_stderr(io.StringIO()):
                 di.load_state(self.p("shared.json"), "Other Journal", sandbox)
+
+    def _legacy_ledger(self, done):
+        """A ledger in the pre-tagging format, at the live ledger's path."""
+        path = di.ledger_path(self.args(), "Travel")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump({"done": done, "failed": {}}, fh)
+        return path
+
+    def _local_date(self, uuid):
+        with dayone.connect(self.db) as con:
+            j = dayone.resolve_journal(con, "Travel")
+            return {e["uuid"]: e["local"] for e in dayone.read_entries(con, j["pk"], {})}[uuid]
+
+    def test_legacy_rehearsal_ledger_is_refused_by_a_live_import(self):
+        # Before ledgers were tagged, a rehearsal wrote sandbox ids into the
+        # live filename. Entry 42 in the real store is something else.
+        self._legacy_ledger({"A" * 32: 42})
+        cli = FakeCLI()
+        cli.add("2020-01-01 00:00:00", "unrelated", "x", pk=42)
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
+    def test_legacy_live_ledger_is_adopted_when_it_matches(self):
+        path = self._legacy_ledger({"A" * 32: 100})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "First", "body one", pk=100)
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 2)          # B and C only
+        with open(path) as fh:
+            led = json.load(fh)
+        self.assertEqual(led["meta"]["target"], "live")
+        self.assertNotIn("_legacy", led)
+
+    def test_legacy_ledger_survives_a_timezone_change(self):
+        # Imported in one zone (the entry landed 8h off today's wall clock),
+        # verified in another: still the same write.
+        path = self._legacy_ledger({"A" * 32: 100})
+        cli = FakeCLI()
+        local = self._local_date("A" * 32)
+        cli.add(local, "First", "body one", pk=100)
+        cli.store[-1]["epoch"] += 8 * 3600
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 2)
+
+    def test_legacy_ledger_with_only_idless_marks_is_refused(self):
+        self._legacy_ledger({"A" * 32: True, "B" * 32: True})
+        cli = FakeCLI()
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
+    def test_older_tag_gains_the_source_on_a_repair(self):
+        path = di.ledger_path(self.args(), "Travel")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump({"done": {"A" * 32: 100}, "failed": {}, "pending": {},
+                       "meta": {"journal": "Travel", "target": "live"}}, fh)
+        state = di.load_state(path, "Travel", None, self.db)
+        di.verify_legacy(self.args(), state, path, [])
+        with open(path) as fh:
+            self.assertEqual(json.load(fh)["meta"]["source"], di._source_id(self.db))
+
+    def test_ledger_from_another_day_one_store_is_refused(self):
+        self.run_import(FakeCLI())
+        with self.assertRaises(SystemExit):
+            with redirect_stderr(io.StringIO()):
+                di.load_state(di.ledger_path(self.args(), "Travel"), "Travel",
+                              None, self.p("other-DayOne.sqlite"))
 
     def test_relative_state_path_works(self):
         cwd = os.getcwd()

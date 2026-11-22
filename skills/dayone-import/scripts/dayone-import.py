@@ -119,9 +119,20 @@ def ledger_path(args, journal_name):
     return os.path.join(STATE_DIR, stem + ".json")
 
 
-def load_state(path, journal_name, target_db=None):
-    """Load a ledger and check it belongs to this journal and destination."""
+def _source_id(db):
+    return os.path.realpath(os.path.expanduser(db or dayone.DEFAULT_DB))
+
+
+def load_state(path, journal_name, target_db=None, source_db=None):
+    """Load a ledger and check it belongs to this journal and destination.
+
+    A ledger written before ledgers recorded their destination has no "meta"
+    and may be a rehearsal's, since rehearsals once shared the live filename.
+    It is marked "_legacy" so the caller checks it against the destination
+    (verify_legacy) before trusting a single primary key in it.
+    """
     target = _target_id(target_db)
+    source = _source_id(source_db)
     if target == "live":
         pull_state(path)
     if os.path.exists(path):
@@ -141,8 +152,74 @@ def load_state(path, journal_name, target_db=None):
             die("ledger %s records writes to %s, not %s. Rehearsal and live "
                 "imports keep separate ledgers; pass the matching --target-db "
                 "(or --state)." % (path, meta["target"], target))
-    state["meta"] = {"journal": journal_name, "target": target}
+        if meta.get("source") not in (None, source):
+            die("ledger %s was built from Day One store %s, not %s. Pass "
+                "--state to choose another." % (path, meta["source"], source))
+        if meta.get("source") is None or meta.get("target") is None:
+            state["_retag"] = True           # tagged by an older version: save the full tag
+    elif state["done"]:
+        state["_legacy"] = True
+    state["meta"] = {"journal": journal_name, "target": target, "source": source}
     return state
+
+
+def verify_legacy(args, state, state_path, entries):
+    """Adopt an untagged ledger only if its entries are really in this store.
+
+    Every done Day One entry must map to a destination entry with that id at
+    the instant the import wrote it. A rehearsal ledger fails this against the
+    real store (its ids point at other entries), so it is refused before an
+    import skips anything or a repair edits the wrong entry.
+    """
+    retag = state.pop("_retag", False)
+    if not state.pop("_legacy", False):
+        if retag and not getattr(args, "dry_run", False):
+            save_state(state_path, state)    # add the fields older tags lack
+        return
+    rows = {r["id"]: r for r in _destination_rows(args.cli, args.target_db)}
+    by_uuid = {e["uuid"]: e for e in entries}
+    bad, checked = [], 0
+    for uuid, pk in state["done"].items():
+        if type(pk) is not int:
+            continue                         # older "True" marks carry no id
+        checked += 1
+        e, row = by_uuid.get(uuid), rows.get(pk)
+        if e is None or row is None or not _same_write(row["epoch"], e):
+            bad.append((uuid, pk))
+    if bad:
+        die("ledger %s predates destination tagging, and %d of its entries do "
+            "not match %s (e.g. Day One %s -> entry %d). It may be a rehearsal's "
+            "ledger. Move it aside, or pass --state / --target-db for the store "
+            "it belongs to." % (state_path, len(bad), _target_id(args.target_db),
+                                bad[0][0], bad[0][1]))
+    if not checked:
+        # Only id-less marks: nothing ties this ledger to this store, and a
+        # rehearsal's marks would make the import skip entries it never wrote.
+        die("ledger %s predates destination tagging and records no entry ids, "
+            "so it cannot be checked against %s. Move it aside to import from "
+            "scratch, or pass --state." % (state_path, _target_id(args.target_db)))
+    if not getattr(args, "dry_run", False):
+        save_state(state_path, state)        # now tagged: verified once
+
+
+def _same_write(epoch, e):
+    """Whether a destination instant is the one this Day One entry was written at.
+
+    The import read --date in the Mac's zone at the time, which may not be
+    today's. A time-zone change moves the instant by a whole number of
+    quarter hours within +/-14h; an unrelated entry essentially never lines up
+    to the second that way.
+    """
+    if epoch is None:
+        return False
+    for stamp in (e.get("local"), e.get("utc")):
+        want = _wall_epoch(stamp)
+        if want is None:
+            continue
+        diff = epoch - want
+        if abs(diff) <= 14 * 3600 and diff % 900 == 0:
+            return True
+    return False
 
 
 def save_state(path, state):
@@ -345,7 +422,8 @@ def cmd_import(args):
     j, entries = gather(args)
     target = args.into or j["name"]
     state_path = ledger_path(args, j["name"])
-    state = load_state(state_path, j["name"], args.target_db)
+    state = load_state(state_path, j["name"], args.target_db, args.db)
+    verify_legacy(args, state, state_path, entries)
     floor_pk = 0
     if not args.dry_run:
         # Prove the ledger can be written before touching the destination:
@@ -571,7 +649,8 @@ def _photo_fix(entry):
 def cmd_fix_locations(args):
     j, entries = gather(args)
     state_path = ledger_path(args, j["name"])
-    state = load_state(state_path, j["name"], args.target_db)
+    state = load_state(state_path, j["name"], args.target_db, args.db)
+    verify_legacy(args, state, state_path, entries)
     if not state["done"]:
         die("no import state at %s -- run `import` first" % state_path)
 
@@ -764,7 +843,8 @@ def cmd_fix_text(args):
     """
     j, entries = gather(args)
     state_path = ledger_path(args, j["name"])
-    state = load_state(state_path, j["name"], args.target_db)
+    state = load_state(state_path, j["name"], args.target_db, args.db)
+    verify_legacy(args, state, state_path, entries)
     if not state["done"]:
         die("no import state at %s -- run `import` first" % state_path)
 
