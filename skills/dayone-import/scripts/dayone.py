@@ -157,12 +157,23 @@ def resolve_journal(con, name):
 
 
 def timezone_name(blob):
-    """Day One stores the entry's zone as an NSKeyedArchiver'd NSTimeZone."""
+    """Day One stores the entry's zone as an NSKeyedArchiver'd NSTimeZone.
+
+    The zone's identifier is the archive's NS.name: a Region/City name, or a
+    fixed offset such as "GMT+0100" (which a Region/City scan used to miss,
+    silently reading the entry's clock as UTC).
+    """
     if not blob:
         return None
     try:
         objs = plistlib.loads(blob).get("$objects", [])
-        # the zone name is the only Region/City string in the archive
+        for o in objs:
+            if isinstance(o, dict) and "NS.name" in o:
+                ref = o["NS.name"]
+                name = objs[ref.data] if hasattr(ref, "data") else None
+                if isinstance(name, str) and name and not name.startswith("$"):
+                    return name
+        # older archives: the zone name is the only Region/City string
         for o in objs:
             if isinstance(o, str) and "/" in o and not o.startswith("$"):
                 return o
@@ -291,13 +302,42 @@ def markdown_to_text(md):
     return "\n".join(out).strip()
 
 
-def _local(utc, tz):
-    if tz and zoneinfo:
+_FIXED_TZ = re.compile(r"(?:GMT|UTC)(?:([+-])(\d{1,2}):?(\d{2})?)?")
+_UNKNOWN_TZ = set()
+
+
+def tzinfo_for(tz):
+    """A tzinfo for a Day One zone name, or None if it cannot be read.
+
+    Region/City names go to zoneinfo; fixed offsets ("GMT+0100", "GMT-08:00",
+    "UTC") become datetime.timezone. Anything else is reported once on stderr
+    rather than silently presented as UTC.
+    """
+    if not tz:
+        return None
+    m = _FIXED_TZ.fullmatch(tz)
+    if m:
+        sign, hh, mm = m.groups()
+        if not sign:
+            return datetime.timezone.utc
+        off = datetime.timedelta(hours=int(hh), minutes=int(mm or 0))
+        if off <= datetime.timedelta(hours=18):
+            return datetime.timezone(off if sign == "+" else -off)
+    elif zoneinfo:
         try:
-            return utc.astimezone(zoneinfo.ZoneInfo(tz))
+            return zoneinfo.ZoneInfo(tz)
         except Exception:
             pass
-    return utc
+    if tz not in _UNKNOWN_TZ:
+        _UNKNOWN_TZ.add(tz)
+        sys.stderr.write("note: unrecognized time zone %r; showing those entries "
+                         "in UTC\n" % tz)
+    return None
+
+
+def _local(utc, tz):
+    z = tzinfo_for(tz)
+    return utc.astimezone(z) if z else utc
 
 
 def media_index(extra_dirs=()):
@@ -412,6 +452,12 @@ def read_entries(con, journal_pk, media=None):
             "utc": utc.strftime("%Y-%m-%d %H:%M:%S"),
             "tz": tz,
             "local": _local(utc, tz).strftime("%Y-%m-%d %H:%M:%S"),
+            # What versions before fixed-offset support read as the local
+            # clock (UTC, since only Region/City names were recognized), so a
+            # ledger written then can still be matched. None when the same.
+            "local_legacy": (utc.strftime("%Y-%m-%d %H:%M:%S")
+                             if tz and "/" not in tz
+                             and _local(utc, tz).utcoffset() else None),
             "modified_local": (_local(mod, tz).strftime("%Y-%m-%d %H:%M:%S")
                                if mod else None),
             "starred": bool(e["ZSTARRED"]),

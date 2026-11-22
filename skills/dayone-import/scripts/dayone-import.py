@@ -298,20 +298,29 @@ def _zone(name):
     return _ZONE_CACHE[name]
 
 
-def _naive(e, mode):
-    try:
-        return datetime.datetime.strptime(e.get(mode) or "", "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
+def _naives(e, mode):
+    """The wall clocks an import in `mode` may have passed as --date.
+
+    For "local" that includes `local_legacy`: versions before fixed-offset
+    zone support read a "GMT+0100" entry's clock as UTC, and a ledger from
+    then recorded that reading.
+    """
+    out = []
+    for key in ((mode, "local_legacy") if mode == "local" else (mode,)):
+        try:
+            out.append(datetime.datetime.strptime(e.get(key) or "", "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            pass
+    return out
 
 
 def _wrote_at(epoch, e, mz):
     """Whether reading the entry's `mode` wall clock in `zone` gives `epoch`."""
     mode, name = mz
-    naive = _naive(e, mode)
-    if epoch is None or naive is None:
+    if epoch is None:
         return False
-    return int(naive.replace(tzinfo=_zone(name)).timestamp()) == epoch
+    z = _zone(name)
+    return any(int(n.replace(tzinfo=z).timestamp()) == epoch for n in _naives(e, mode))
 
 
 def _import_zones(pairs):
@@ -322,14 +331,14 @@ def _import_zones(pairs):
     """
     if not pairs:
         return []
-    prepared = [({m: _naive(e, m) for m in ("local", "utc")}, row["epoch"])
+    prepared = [({m: _naives(e, m) for m in ("local", "utc")}, row["epoch"])
                 for e, row in pairs]
 
     def score(mode, name):
         z = _zone(name)
-        return sum(1 for naive, epoch in prepared if naive[mode] is not None
-                   and epoch is not None
-                   and int(naive[mode].replace(tzinfo=z).timestamp()) == epoch)
+        return sum(1 for naives, epoch in prepared if epoch is not None
+                   and any(int(n.replace(tzinfo=z).timestamp()) == epoch
+                           for n in naives[mode]))
 
     names = sorted(zoneinfo.available_timezones())
     local = os.environ.get("TZ")

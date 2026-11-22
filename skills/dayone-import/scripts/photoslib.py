@@ -85,6 +85,22 @@ def parse_place(blob):
     return out
 
 
+def _lon_window(lon, dlon):
+    """SQL and arguments for longitudes within dlon of lon, wrapping at +/-180.
+
+    Near the antimeridian the window spills past 180 (or -180): a photo at
+    179.999 and an asset at -179.999 are a few hundred meters apart.
+    """
+    lo, hi = lon - dlon, lon + dlon
+    if dlon >= 180:
+        return "1", []
+    if lo < -180:
+        return "z.ZLONGITUDE >= ? or z.ZLONGITUDE <= ?", [lo + 360, hi]
+    if hi > 180:
+        return "z.ZLONGITUDE >= ? or z.ZLONGITUDE <= ?", [lo, hi - 360]
+    return "z.ZLONGITUDE between ? and ?", [lo, hi]
+
+
 def match(con, wall, lat, lon, seconds=120, meters=300):
     """Find the library asset shot at this wall clock and place.
 
@@ -105,19 +121,20 @@ def match(con, wall, lat, lon, seconds=120, meters=300):
     target = dt.replace(tzinfo=datetime.timezone.utc).timestamp() - CD_EPOCH
     dlat = meters / 111_000.0
     dlon = meters / (111_000.0 * max(0.05, math.cos(math.radians(lat))))
+    lon_sql, lon_args = _lon_window(lon, dlon)
     row = con.execute("""
         select z.ZUUID, z.ZLATITUDE, z.ZLONGITUDE,
                a.ZREVERSELOCATIONDATA, a.ZORIGINALFILENAME, a.ZTIMEZONENAME,
                (z.ZDATECREATED + coalesce(a.ZTIMEZONEOFFSET, 0)) local_t
         from ZASSET z
         left join ZADDITIONALASSETATTRIBUTES a on a.ZASSET = z.Z_PK
-        where z.ZLATITUDE between ? and ? and z.ZLONGITUDE between ? and ?
+        where z.ZLATITUDE between ? and ? and (%s)
           and z.ZTRASHEDDATE is null
           and abs(z.ZDATECREATED + coalesce(a.ZTIMEZONEOFFSET, 0) - ?) <= ?
         order by abs(z.ZDATECREATED + coalesce(a.ZTIMEZONEOFFSET, 0) - ?)
         limit 1
-    """, (lat - dlat, lat + dlat, lon - dlon, lon + dlon,
-          target, seconds, target)).fetchone()
+    """ % lon_sql, (lat - dlat, lat + dlat, *lon_args,
+                    target, seconds, target)).fetchone()
     if not row:
         return None
     info = parse_place(row["ZREVERSELOCATIONDATA"])

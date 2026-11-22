@@ -553,6 +553,15 @@ if [ $? -eq 0 ]; then
   "$CLI" edit --remove-media $BAID --db "$DB" $BPK2 >/dev/null 2>&1
   ok "--db ends a list option's values" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$BPK2;")" "0"
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
+  # --- third review pass (Markdown): nested emphasis and private-use text ---
+  ok "nested bold stays bold"          "$("$CLI" render --body '**outer __inner__ outer**' | grep -c 'b0')" "0"
+  PUAFILE="$SB/pua.md"
+  python3 "$ROOT/tests/make-pua.py" "$PUAFILE"
+  PUAWANT=$(python3 "$ROOT/tests/make-pua.py" --expect)
+  ok "private-use text survives a full BMP window" "$("$CLI" render --body-file "$PUAFILE" --plain)" "$PUAWANT"
+  ok "control characters do not end italics" "$(printf '*a\002b\007c*' | "$CLI" render | grep -c 'i0')" "0"
+  ok "control characters are kept as text"  "$(printf '*a\002b\007c*' | "$CLI" render --plain | od -An -c | tr -s ' ')" "$(printf 'a\002b\007c' | od -An -c | tr -s ' ')"
+  # --- end third review pass (Markdown) ---
   # Fixed-format dates ignore the user's calendar (-AppleLocale is a
   # Foundation argument-domain default, honored per process).
   BUD="th_TH@calendar=buddhist"
