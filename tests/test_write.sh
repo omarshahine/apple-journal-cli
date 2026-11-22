@@ -548,6 +548,8 @@ if [ $? -eq 0 ]; then
   python3 "$ROOT/tests/make-pua.py" "$PUAFILE"
   PUAWANT=$(python3 "$ROOT/tests/make-pua.py" --expect)
   ok "private-use text survives a full BMP window" "$("$CLI" render --body-file "$PUAFILE" --plain)" "$PUAWANT"
+  ok "control characters do not end italics" "$(printf '*a\002b\007c*' | "$CLI" render | grep -c 'i0')" "0"
+  ok "control characters are kept as text"  "$(printf '*a\002b\007c*' | "$CLI" render --plain | od -An -c | tr -s ' ')" "$(printf 'a\002b\007c' | od -An -c | tr -s ' ')"
   # --- end third review pass (Markdown) ---
   # Fixed-format dates ignore the user's calendar (-AppleLocale is a
   # Foundation argument-domain default, honored per process).

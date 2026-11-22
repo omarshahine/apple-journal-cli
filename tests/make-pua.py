@@ -1,7 +1,7 @@
 """Markdown text that occupies every private-use escape window in the BMP.
 
 journal-cli hides escaped punctuation in a private-use window the line does
-not already use. One character in each 18-codepoint window of U+E000..U+F8FF
+not already use. One character in each 26-codepoint window of U+E000..U+F8FF
 leaves no free window there, which used to make it reuse an occupied one and
 rewrite those characters as punctuation.
 
@@ -10,7 +10,7 @@ rewrite those characters as punctuation.
 """
 import sys
 
-WIDTH = 18  # len(ESCAPABLE) in Markdown.swift
+WIDTH = 26  # len(ESCAPABLE) in Markdown.swift: 18 punctuation + 8 controls
 chars = "".join(chr(0xE000 + i * WIDTH) for i in range((0xF8FF - 0xE000) // WIDTH + 1))
 
 if sys.argv[1] == "--expect":

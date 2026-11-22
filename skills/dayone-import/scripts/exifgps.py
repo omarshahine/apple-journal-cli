@@ -40,12 +40,16 @@ def _dms(tiff, entry, order, limit):
 
 
 def _ref(tiff, entry, allowed):
-    """A GPS reference letter (ASCII, type 2), or None if absent/garbled."""
+    """A GPS reference letter (ASCII, type 2), or None if absent/garbled.
+
+    The raw byte is compared, not a decoded string: b"\\xff" decodes to ""
+    and "" is "in" any string, which would read damage as north or east.
+    """
     typ, cnt, val = entry
     if typ != 2 or cnt < 1 or val >= len(tiff):
         return None
-    c = tiff[val:val + 1].decode("ascii", "ignore")
-    return c if c in allowed else None
+    c = tiff[val:val + 1]
+    return c.decode("ascii") if len(c) == 1 and c in [x.encode() for x in allowed] else None
 
 
 def _ifd(b, base, off, order, want):

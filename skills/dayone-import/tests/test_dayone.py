@@ -268,6 +268,8 @@ class ExifTests(Tmp):
             "minutes out of range": jpeg_gps(lat=(47, 75, 0)),
             "latitude out of range": jpeg_gps(lat=(95, 0, 0)),
             "garbled reference": jpeg_gps(lat_ref=b"X"),
+            "non-ASCII reference": jpeg_gps(lat_ref=b"\xff"),
+            "empty reference": jpeg_gps(lat_ref=b"\x00"),
         }
         for why, data in cases.items():
             g = exifgps.read(self._write("bad-%s.jpg" % why.replace(" ", "-"), data))

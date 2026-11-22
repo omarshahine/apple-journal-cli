@@ -51,7 +51,11 @@ private let EMPH = rx("(?<![\\w*_])([*_])(?=\\S)([^*_]+?)(?<=\\S)\\1(?![\\w*_])"
 // emphasis parsing intact -- "\\*literal\\*" is a literal asterisk pair, not
 // italics -- so each one is swapped for a private-use codepoint before the
 // emphasis regexes run and swapped back afterwards.
-private let ESCAPABLE = Array("\\`*_{}[]()#+-.!>~|")
+// The C0 controls U+0001...U+0008 are hidden the same way, unconditionally:
+// they are this file's own emphasis and link markers, and a literal one in
+// the input would otherwise end (or start) formatting early.
+private let CONTROLS: [Character] = (1...8).map { Character(Unicode.Scalar(UInt8($0))) }
+private let ESCAPABLE = Array("\\`*_{}[]()#+-.!>~|") + CONTROLS
 
 /// Pick a private-use window this text does not already use, so a literal
 /// private-use character in someone's entry is never mistaken for our own
@@ -116,6 +120,8 @@ private func protectInline(_ s: String, _ base: UInt32) -> String {
         } else if ch == "`" {
             inCode = true
             code = ""
+        } else if CONTROLS.contains(ch) {
+            hide(ch)
         } else {
             out.append(ch)
         }
