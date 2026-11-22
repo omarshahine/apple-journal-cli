@@ -142,11 +142,13 @@ other devices. `sync-journals` is a read-only audit and instruction command.
   not match (pass `--target-db` for a sandbox, or `--state FILE` to choose
   one). A ledger from before 1.4.5 carries no such tag, and back then a
   rehearsal wrote to the live filename, so an untagged ledger is checked
-  first: every recorded entry must exist in the destination at the instant
-  it was written (allowing a time-zone change since) and carry the same
-  words. Old marks with no entry id are looked up the same way: found, they
-  get their id; not found, the entry is imported again. If it all matches,
-  the ledger is tagged and used. If not, the
+  first: every recorded entry must exist in the destination at the exact
+  second it was written, all under one inferred import time zone (which
+  absorbs daylight saving and any zone change since). Words are not required
+  to match, since entries are often edited after an import. Old marks with no
+  entry id are looked up by that instant, with words breaking ties: found,
+  they get their id; not found, the entry is imported again. If it all
+  matches, the ledger is tagged and used. If not, the
   command stops and names the mismatch; move the ledger aside. The
   destination is resolved the way journal-cli resolves it: `--target-db`,
   else `$JOURNAL_DB`, else the real store, so a `$JOURNAL_DB` sandbox gets a

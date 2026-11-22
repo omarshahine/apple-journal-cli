@@ -15,7 +15,7 @@ hours -- sometimes a whole day -- off. Day One's SQLite store still has the
 original zone per entry, so this reads that directly and uses the export
 folder only as a source of image bytes.
 """
-import os, re, sys, json, time, shutil, sqlite3, hashlib, argparse, collections, subprocess, datetime
+import os, re, sys, json, time, shutil, zoneinfo, sqlite3, hashlib, argparse, collections, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dayone, exifgps, photoslib
@@ -179,16 +179,25 @@ def verify_legacy(args, state, state_path, entries):
     listed = _destination_rows(args.cli, args.target_db)
     rows = {r["id"]: r for r in listed}
     by_uuid = {e["uuid"]: e for e in entries}
-    bad, checked = [], 0
-    for uuid, pk in state["done"].items():
-        if type(pk) is not int:
-            continue                         # older "True" marks carry no id
-        checked += 1
-        e, row = by_uuid.get(uuid), rows.get(pk)
-        # Same instant (allowing a time-zone change) AND the same words: a
-        # rehearsal id that lands on some other entry fails one or the other.
-        if (e is None or row is None or not _same_write(row["epoch"], e)
-                or not _same_content(row, e)):
+    # The old import read each --date in one time zone (and one --time-mode).
+    # Find the (mode, zone) pairs under which these mappings land exactly, to
+    # the second, on their destination instants -- that absorbs daylight
+    # saving and any zone change since -- keep every pair that explains the
+    # most of them, and refuse the ledger if any mapping is left unexplained.
+    # A rehearsal's ids point at unrelated entries, and a stray entry a
+    # quarter hour off cannot fit the same zone as the rest.
+    #
+    # Content is deliberately not required here: people edit entries after an
+    # import (checked against real ledgers: rewritten endings, quotes split
+    # into title and author), and that must not make a genuine ledger unusable.
+    mapped = [(uuid, pk, by_uuid.get(uuid), rows.get(pk))
+              for uuid, pk in state["done"].items() if type(pk) is int]
+    zones = _import_zones([(e, row) for _, _, e, row in mapped
+                           if e is not None and row is not None])
+    bad, checked = [], len(mapped)
+    for uuid, pk, e, row in mapped:
+        if (e is None or row is None
+                or not any(_wrote_at(row["epoch"], e, z) for z in zones)):
             bad.append((uuid, pk))
     if bad:
         die("ledger %s predates destination tagging, and %d of its entries do "
@@ -211,8 +220,13 @@ def verify_legacy(args, state, state_path, entries):
         if type(pk) is int:
             continue
         e = by_uuid.get(uuid)
+        # Any equally good (mode, zone) may be the right one; only a mark that
+        # none of them can place is dropped. Several entries at that second are
+        # told apart by their words.
         hits = [r for r in listed if e is not None and r["id"] not in claimed
-                and _same_write(r["epoch"], e) and _same_content(r, e)]
+                and any(_wrote_at(r["epoch"], e, z) for z in zones)]
+        if len(hits) > 1:
+            hits = [r for r in hits if _same_content(r, e)]
         if len(hits) == 1:
             state["done"][uuid] = hits[0]["id"]
             claimed.add(hits[0]["id"])
@@ -224,24 +238,69 @@ def verify_legacy(args, state, state_path, entries):
         save_state(state_path, state)        # now tagged: verified once
 
 
-def _same_write(epoch, e):
-    """Whether a destination instant is the one this Day One entry was written at.
+_ZONE_CACHE = {}
 
-    The import read --date in the Mac's zone at the time, which may not be
-    today's. A time-zone change moves the instant by a whole number of
-    quarter hours within +/-14h; an unrelated entry essentially never lines up
-    to the second that way.
-    """
-    if epoch is None:
+
+def _zone(name):
+    if name not in _ZONE_CACHE:
+        _ZONE_CACHE[name] = zoneinfo.ZoneInfo(name)
+    return _ZONE_CACHE[name]
+
+
+def _naive(e, mode):
+    try:
+        return datetime.datetime.strptime(e.get(mode) or "", "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _wrote_at(epoch, e, mz):
+    """Whether reading the entry's `mode` wall clock in `zone` gives `epoch`."""
+    mode, name = mz
+    naive = _naive(e, mode)
+    if epoch is None or naive is None:
         return False
-    for stamp in (e.get("local"), e.get("utc")):
-        want = _wall_epoch(stamp)
-        if want is None:
-            continue
-        diff = epoch - want
-        if abs(diff) <= 14 * 3600 and diff % 900 == 0:
-            return True
-    return False
+    return int(naive.replace(tzinfo=_zone(name)).timestamp()) == epoch
+
+
+def _import_zones(pairs):
+    """The (mode, zone) pairs that best explain these (entry, row) writes.
+
+    Today's zone is tried first: if it explains every write, that is the
+    answer (in each mode that does) and no other zone is scanned. Otherwise
+    every pair that explains the most writes is returned, ties included.
+    """
+    if not pairs:
+        return []
+    prepared = [({m: _naive(e, m) for m in ("local", "utc")}, row["epoch"])
+                for e, row in pairs]
+
+    def score(mode, name):
+        z = _zone(name)
+        return sum(1 for naive, epoch in prepared if naive[mode] is not None
+                   and epoch is not None
+                   and int(naive[mode].replace(tzinfo=z).timestamp()) == epoch)
+
+    names = sorted(zoneinfo.available_timezones())
+    local = os.environ.get("TZ")
+    if not local:
+        try:
+            local = os.path.realpath("/etc/localtime").split("zoneinfo/", 1)[1]
+        except IndexError:
+            local = None
+    if local in names:
+        full = [(m, local) for m in ("local", "utc") if score(m, local) == len(prepared)]
+        if full:
+            return full
+    best, top = [], 0
+    for mode in ("local", "utc"):
+        for name in names:
+            n = score(mode, name)
+            if n > top:
+                best, top = [(mode, name)], n
+            elif n == top and n:
+                best.append((mode, name))
+    return best
 
 
 def save_state(path, state):
@@ -396,12 +455,19 @@ def _norm(s, digits=False):
 
 def _field_matches(dest, forms):
     """Whether a destination field carries one of these source forms."""
-    forms = [f for f in forms if f]
+    # A form with no letters or digits ("---", a lone emoji) says nothing.
+    forms = [f for f in forms if _norm(f, True)]
     if not forms:
         return True                            # nothing to compare in this field
     digits = not any(_norm(f) for f in forms)  # e.g. a title that is just "2024"
     have = _norm(dest, digits)
-    return any(_norm(f, digits)[:40] in have for f in forms if _norm(f, digits))
+    # Equal, or the same opening AND closing 40 letters: a shared introduction
+    # with a different ending is a different entry.
+    for f in forms:
+        want = _norm(f, digits)
+        if want and (want == have or (want[:40] in have and want[-40:] in have)):
+            return True
+    return False
 
 
 def _same_content(row, e):
