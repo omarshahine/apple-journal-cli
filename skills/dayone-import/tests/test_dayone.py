@@ -258,6 +258,12 @@ class TextTests(Tmp):
         md = "Title\n\\![](dayone-moment://" + "C" * 32 + ")"
         e = self.entries(md)[0]
         self.assertIn("dayone-moment", e["body_md"])
+        # Two backslashes are an escaped backslash: the reference is live,
+        # is removed, and the escaped backslash stays.
+        md = "Title\nx \\\\![](dayone-moment://" + "C" * 32 + ")"
+        e = self.entries(md)[0]
+        self.assertNotIn("dayone-moment", e["body_md"])
+        self.assertEqual(e["body_md"], "x \\\\")
 
     def test_entry_opening_with_a_fence_has_no_title(self):
         e = self.entries("```\ncode here\n```")[0]
@@ -691,6 +697,59 @@ class ImportTests(Tmp):
         default = di.ledger_path(self.args(), "Travel")
         self.assertEqual(di._remote_key(default, ident_a),
                          di.REMOTE_PREFIX + "/" + os.path.basename(default))
+
+    def test_fix_text_clears_a_fence_promoted_to_the_title(self):
+        # An older reader made the opening fence the title. The source now has
+        # no title, so fix-text must pass an explicit empty one: an omitted
+        # --title keeps the stored value.
+        db = self.p("fence.sqlite")
+        make_dayone(db, [(1, "D" * 32, 1700000000, "```\ncode here\n```")])
+        args = self.args(db=db, max_failures=5)
+        path = di.ledger_path(args, "Travel")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump({"done": {"D" * 32: 100}, "failed": {}, "pending": {},
+                       "meta": {"journal": "Travel", "target": "live",
+                                "source": di._source_id(db)}}, fh)
+        calls = []
+
+        def run(cmd, *a, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        render = lambda cli, md, inline=False, plain=False: (md or "").encode()
+        with mock.patch.object(di, "_stored",
+                               lambda cli, db: ({100: ("```", "code here", None)}, False, set())), \
+                mock.patch.object(di, "_render", render), \
+                mock.patch.object(di.subprocess, "run", run), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            di.cmd_fix_text(args)
+        edits = [c for c in calls if "edit" in c]
+        self.assertEqual(len(edits), 1, calls)
+        i = edits[0].index("--title")
+        self.assertEqual(edits[0][i + 1], "")
+
+    def test_pull_falls_back_to_the_old_basename_key(self):
+        # Published by an earlier version under the bare filename.
+        local = self.p("custom", "state.json")
+        ident = {"journal": "Travel", "source": "/a/DayOne.sqlite", "target": "live"}
+        old_key = di.REMOTE_PREFIX + "/state.json"
+        body = json.dumps({"done": {"A" * 32: 100}, "failed": {}})
+
+        def remote(args, *extra, **kw):
+            return body if args == ["get", old_key] else None
+        with mock.patch.object(di, "_remote", remote), redirect_stderr(io.StringIO()):
+            di.pull_state(local, ident)
+        with open(local) as fh:
+            self.assertEqual(json.load(fh)["done"], {"A" * 32: 100})
+
+    def test_pull_skips_an_old_key_that_belongs_to_another_import(self):
+        local = self.p("custom2", "state.json")
+        ident = {"journal": "Travel", "source": "/a/DayOne.sqlite", "target": "live"}
+        body = json.dumps({"done": {"X": 1}, "meta": {"journal": "Other"}})
+        with mock.patch.object(di, "_remote", lambda args, *e, **k: body), \
+                redirect_stderr(io.StringIO()):
+            di.pull_state(local, ident)
+        self.assertFalse(os.path.exists(local))
 
     def test_publish_does_not_overwrite_another_imports_ledger(self):
         local = self.p("Travel.json")

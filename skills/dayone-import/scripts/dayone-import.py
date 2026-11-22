@@ -70,26 +70,35 @@ def _remote(args, *extra, **kw):
 
 
 def pull_state(path, ident=None):
-    """Seed the local cache from the worker when this machine has no copy."""
+    """Seed the local cache from the worker when this machine has no copy.
+
+    Tries the ledger's own key, then the bare-filename key earlier versions
+    published every ledger under, so a --state ledger from before the keys
+    changed is still found. Either copy is restored only if it records this
+    import (or records nothing, in which case load_state treats it as an
+    untagged ledger and verifies it against the destination before use).
+    """
     if os.path.exists(path):
         return
-    body = _remote(["get", _remote_key(path, ident)])
-    if not body:
+    keys = [_remote_key(path, ident), _remote_key(path)]
+    for key in dict.fromkeys(keys):             # de-duplicated, in order
+        body = _remote(["get", key])
+        if not body:
+            continue
+        try:
+            remote = json.loads(body)
+        except ValueError:
+            continue                            # not our file; leave it alone
+        meta = remote.get("meta") if isinstance(remote, dict) else None
+        if ident and meta and not _same_identity(meta, ident):
+            sys.stderr.write("note: plugin-data ledger %s belongs to another "
+                             "import; not restoring it\n" % key)
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(body)
+        sys.stderr.write("restored import ledger from plugin-data: %s\n" % key)
         return
-    try:
-        remote = json.loads(body)
-    except ValueError:
-        return                                  # not our file; leave it alone
-    meta = remote.get("meta") if isinstance(remote, dict) else None
-    if ident and meta and not _same_identity(meta, ident):
-        sys.stderr.write("note: plugin-data ledger %s belongs to another import; "
-                         "not restoring it\n" % _remote_key(path, ident))
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
-        fh.write(body)
-    sys.stderr.write("restored import ledger from plugin-data: %s\n"
-                     % _remote_key(path, ident))
 
 
 def publish_state(path, ident=None):
@@ -1106,11 +1115,17 @@ def cmd_fix_text(args):
         body_md = e.get("body_md")
         if body_md is None:
             body_md = e["body"]
+        # An omitted --title keeps whatever is stored, so a title the source
+        # does not have (an older import promoted a code fence to the title)
+        # is cleared explicitly with an empty one.
+        clear_title = not title_md and bool((stored[pk][0] or "").strip())
         if title_md:
             cmd += ["--title", title_md]
+        elif clear_title:
+            cmd += ["--title", ""]
         if body_md is not None and (body_md != "" or e["body"] == ""):
             cmd += ["--body", body_md]
-        if not title_md and not body_md:
+        if not title_md and not body_md and not clear_title:
             continue
         if not args.target_db:
             cmd += ["--live", "--accept-risk"]

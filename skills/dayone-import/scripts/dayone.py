@@ -34,8 +34,12 @@ MOMENT_RE = re.compile(
 # Real (not backslash-escaped) Day One reference syntax, any kind --
 # photo, audio, video, pdfAttachment, ... -- which is never text. Other image
 # syntax (an external URL, say) is content and stays in the text.
-_MOMENT_LIVE_RE = re.compile(r"(?<!\\)" + MOMENT_RE.pattern)
-_MOMENT_ANY_RE = re.compile(r"(?<!\\)!\[\]\(dayone-moment:[^)\s]*\)")
+# A "!" is escaped only by an odd run of backslashes ("\\!" is an escaped
+# backslash and a live "!"), so each pattern captures the even run in front
+# (group "lead") and keeps it when the reference is removed.
+_LEAD = r"(?<!\\)(?P<lead>(?:\\\\)*)"
+_MOMENT_LIVE_RE = re.compile(_LEAD + MOMENT_RE.pattern)
+_MOMENT_ANY_RE = re.compile(_LEAD + r"!\[\]\(dayone-moment:[^)\s]*\)")
 
 
 def die(msg):
@@ -228,8 +232,8 @@ def _split_moments(md):
             blanks = 0
             out.append(line)
             continue
-        refs.extend(_MOMENT_LIVE_RE.findall(line))
-        line = _MOMENT_ANY_RE.sub("", line)
+        refs.extend(m.group(2) for m in _MOMENT_LIVE_RE.finditer(line))
+        line = _MOMENT_ANY_RE.sub(lambda m: m.group("lead"), line)
         # Same rule as before for prose: runs of empty lines collapse to one
         # (a whitespace-only line is not empty, and stays).
         if line == "":
