@@ -14,7 +14,7 @@ import argparse, json, os, shutil, sqlite3, stat, subprocess, sys, tempfile, uui
 
 GROUP = os.path.expanduser("~/Library/Group Containers/group.com.apple.moments/Library")
 DEFAULT_DB = os.path.join(GROUP, "moments.sqlite")
-VERSION = "1.4.6"                      # keep in step with npm/package.json
+VERSION = "1.4.7"                      # keep in step with npm/package.json
 # $JOURNAL_BACKUP_DIR overrides the backup root and, when set, backs up
 # sandbox stores too, which is how the test suite exercises backups.
 BACKUP_OVERRIDE = os.environ.get("JOURNAL_BACKUP_DIR") or None

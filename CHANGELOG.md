@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.7
+
+### Fixed: dayone-import legacy ledger identity
+
+([#26](https://github.com/omarshahine/apple-journal-cli/pull/26)) A pre-1.4.4
+ledger is now verified by each entry's exact instant under the time zone the
+old import ran in, inferred from the ledger itself (daylight saving and later
+zone changes included), and every mapping must fit that one zone. Edits made
+in Journal since the import no longer block a genuine ledger, which the 1.4.6
+content check did. Id-less marks are located by instant, with the words
+breaking ties.
+
 ## 1.4.6
 
 ### Fixed: dayone-import legacy ledgers check content too
