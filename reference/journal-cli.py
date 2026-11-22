@@ -681,7 +681,9 @@ def md_label(s):
 
 def md_dest(s):
     """Angle-bracket Markdown destination: survives spaces and parentheses."""
-    enc = {"\n": "%0A", "\r": "%0D"}   # line breaks can't appear in a destination
+    # line breaks can't appear in a destination; %, # and ? are URL syntax
+    # a renderer would act on ("%20" -> space, "#"/"?" cut the path short)
+    enc = {"\n": "%0A", "\r": "%0D", "%": "%25", "#": "%23", "?": "%3F"}
     return "<" + "".join(enc.get(ch) or ("\\" + ch if ch in "\\<>&" else ch)
                          for ch in s) + ">"
 

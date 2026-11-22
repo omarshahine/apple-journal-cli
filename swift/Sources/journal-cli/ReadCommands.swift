@@ -171,6 +171,11 @@ func mdDest(_ s: String) -> String {
         case "\n": out += "%0A"
         case "\r": out += "%0D"
         case "\r\n": out += "%0D%0A"
+        // URL syntax a renderer would act on: "%20" would decode to a space,
+        // and "#"/"?" would cut the path short.
+        case "%": out += "%25"
+        case "#": out += "%23"
+        case "?": out += "%3F"
         // "&" would start an entity: "&copy;" names a different path.
         case "\\", "<", ">", "&": out.append("\\"); out.append(ch)
         default: out.append(ch)
