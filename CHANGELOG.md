@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.9
+
+### Fixed: dayone-import attachment references
+
+([#29](https://github.com/omarshahine/apple-journal-cli/pull/29)) Every Day One
+attachment reference taken out of an entry's text is now reported: a
+`pdfAttachment` or unrecognized reference used to vanish without reaching the
+missing-media list. `fix-export --flag-missing` flags such references too, and
+no longer crashes on one that has no attachment id.
+
 ## 1.4.8
 
 ### Fixed: second review pass, dayone-import
