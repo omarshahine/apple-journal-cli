@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.4.5
+
+### Fixed: dayone-import skill
+
+([#24](https://github.com/omarshahine/apple-journal-cli/pull/24))
+
+- **A longer fence keeps a shorter one as content.** A four-backtick block
+  holding a three-backtick line and `---` used to flatten to nothing, and an
+  untitled entry with that body was skipped as empty.
+- **Ledgers from before 1.4.4 are checked before use.** Back then a rehearsal
+  shared the live ledger's filename. An untagged ledger is now verified against
+  the destination (every recorded entry at the instant it was written,
+  tolerant of a time-zone change since). A mismatch, or a ledger with no entry
+  ids at all, stops the command instead of skipping entries or repairing the
+  wrong ones. Ledgers also record their Day One store and refuse another.
+
 ## 1.4.4
 
 ### Fixed: dayone-import skill
