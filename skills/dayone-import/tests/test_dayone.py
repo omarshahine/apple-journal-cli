@@ -245,6 +245,18 @@ class ExifTests(Tmp):
         # A second byte that is not NUL is not a GPS ref either.
         self.assertIsNone(exifgps._ref(b"NX" + b"\x00" * 6, (2, 2, 0), "NS"))
 
+    def test_gps_values_outside_the_exif_segment_are_ignored(self):
+        # APP1 is declared to end just before the GPS rationals, which sit in
+        # an APP2 segment at the offsets the GPS entries point to. Only APP1
+        # is EXIF, so those values are not GPS.
+        full = jpeg_with_gps()
+        app1 = full[6:-2]                      # "Exif\0\0" + TIFF
+        head, rats = app1[:-52], app1[-48:]    # drop the 4-byte next-IFD slot
+        data = (b"\xff\xd8\xff\xe1" + struct.pack(">H", len(head) + 2) + head
+                + b"\xff\xe2" + struct.pack(">H", len(rats) + 2) + rats + b"\xff\xd9")
+        self.assertNotIn("lat", exifgps.read(self._write("app2.jpg", data)))
+        self.assertIn("lat", exifgps.read(self._write("ok.jpg", full)))
+
     def test_valid_gps_reads(self):
         g = exifgps.read(self._write("ok.jpg", jpeg_with_gps()))
         self.assertAlmostEqual(g["lat"], 47.6, places=3)

@@ -821,14 +821,14 @@ ok "refused read leaves no snapshot" "$(find "$TDIR" -mindepth 1 -maxdepth 1 -na
 
 # Markdown export: link-only entries keep their link, and attachment paths
 # with spaces and parentheses stay valid link destinations.
-KOUT=$("$CLI" --db "$DB" write --link https://example.org/page --link-title "Example (page)" 2>&1)
+KOUT=$("$CLI" --db "$DB" write --link 'https://example.org/page?q=cats&n=2#top%20x' --link-title "Example (page)" 2>&1)
 KPK=$(echo "$KOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 SBX=$(mktemp -d "/tmp/journal sandbox &copy; (x).XXXXXX")
 DBX=$("$CLI" sandbox --dir "$SBX" --from "$DB")
 XOUT=$("$CLI" --db "$DBX" write --body "Spaced path." --media "$IMG" 2>&1)
 XPK=$(echo "$XOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 EXX="$SBX/exp"; "$CLI" --db "$DBX" export --dir "$EXX" >/dev/null 2>&1
-ok "link-only entry exports its link" "$(entryfiles "$EXX" "$KPK" | while IFS= read -r f; do cat "$f"; done | grep -cF 'Example (page)](<https://example.org/page>)')" "1"
+ok "link-only entry exports its link, query and fragment intact" "$(entryfiles "$EXX" "$KPK" | while IFS= read -r f; do cat "$f"; done | grep -cF 'Example (page)](<https://example.org/page?q=cats\&n=2#top%20x>)')" "1"
 # The Core Data epoch (ZENTRYDATE 0) is a real date: show and list agree.
 sqlite3 "$DB" "update ZJOURNALENTRYMO set ZENTRYDATE=0 where Z_PK=$KPK;"
 ok "epoch date shows" "$("$CLI" --db "$DB" show $KPK --json | jq_ 'd["date"]')" "$("$CLI" --db "$DB" list --json --include-empty --limit 100000 | jq_ '[e["date"] for e in d if e["id"]=='"$KPK"'][0]')"
@@ -848,19 +848,19 @@ trash "$SBX" 2>/dev/null
 
 # Line breaks in an attachment path (LF, CR and CRLF; Swift treats CRLF as
 # one character) are percent-encoded, and the link decodes to the real file.
-SBN=$(mktemp -d "/tmp/journal-nl.XXXXXX")/$(printf 'a\nb\rc\r\nd')
+SBN=$(mktemp -d "/tmp/journal-nl.XXXXXX")/$(printf 'a\nb\rc\r\nd%%20e#f?g')
 mkdir -p "$SBN"
 DBN=$("$CLI" sandbox --dir "$SBN" --from "$DB")
 NOUT=$("$CLI" --db "$DBN" write --body "Line breaks." --media "$IMG" 2>&1)
 NPK=$(echo "$NOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
 EXN="$(dirname "$SBN")/exp"; "$CLI" --db "$DBN" export --dir "$EXN" >/dev/null 2>&1
-ok "line breaks in a path stay one valid link" "$(python3 -c '
+ok "line breaks, %, # and ? in a path stay one valid link" "$(python3 -c '
 import glob,os,re,sys
 f=(glob.glob(sys.argv[1]+"/*-"+sys.argv[2]+".md")+glob.glob(sys.argv[1]+"/*-"+sys.argv[2]+"-*.md"))[0]
 links=[m.group(1) for m in re.finditer(r"!\[[^\]\n]*\]\(<([^\n>]*(?:\\>[^\n>]*)*)>\)", open(f, newline="").read())]
 def dec(d):
-    d=re.sub(r"%0D%0A|%0A|%0D", lambda m:{"%0D%0A":"\r\n","%0A":"\n","%0D":"\r"}[m.group(0)], d)
-    return re.sub(r"\\(.)", r"\1", d)
+    from urllib.parse import unquote
+    return unquote(re.sub(r"\\(.)", r"\1", d))
 print(bool(links) and all(("%0A" in l and "%0D" in l) and os.path.exists(dec(l)) for l in links))' "$EXN" "$NPK")" "True"
 trash "$(dirname "$SBN")" 2>/dev/null
 

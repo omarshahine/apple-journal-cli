@@ -123,6 +123,7 @@ def _parse(b, out):
         marker, seglen = b[i + 1], struct.unpack(">H", b[i + 2:i + 4])[0]
         if marker == 0xE1 and b[i + 4:i + 10] == b"Exif\x00\x00":
             app1 = i + 10
+            app1_end = i + 2 + seglen          # the segment's own declared end
             break
         if marker in (0xD8, 0xD9) or seglen < 2:
             break
@@ -130,7 +131,9 @@ def _parse(b, out):
     if app1 is None:
         return
 
-    tiff = b[app1:]
+    # Only the APP1 segment is EXIF: offsets that point past it (into APP2, or
+    # image data) are damage, not GPS.
+    tiff = b[app1:min(app1_end, len(b))]
     if len(tiff) < 8:
         return
     if tiff[:2] == b"II":

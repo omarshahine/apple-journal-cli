@@ -679,9 +679,13 @@ def md_label(s):
     """Markdown link text with brackets and backslashes escaped."""
     return "".join("\\" + ch if ch in "\\[]&" else ch for ch in s)
 
-def md_dest(s):
+def md_dest(s, is_path=True):
     """Angle-bracket Markdown destination: survives spaces and parentheses."""
-    enc = {"\n": "%0A", "\r": "%0D"}   # line breaks can't appear in a destination
+    # line breaks can't appear in a destination; %, # and ? are URL syntax
+    # a renderer would act on ("%20" -> space, "#"/"?" cut the path short)
+    enc = {"\n": "%0A", "\r": "%0D"}
+    if is_path:                         # a web link keeps its own query and escapes
+        enc.update({"%": "%25", "#": "%23", "?": "%3F"})
     return "<" + "".join(enc.get(ch) or ("\\" + ch if ch in "\\<>&" else ch)
                          for ch in s) + ">"
 
@@ -690,7 +694,7 @@ def md_asset_text(assets):
     lines = []
     for a in assets:
         if a.get("url"):
-            lines.append(f"[{md_label(a.get('link_title') or a['url'])}]({md_dest(a['url'])})")
+            lines.append(f"[{md_label(a.get('link_title') or a['url'])}]({md_dest(a['url'], is_path=False)})")
         if a.get("transcript"): lines.append(f"Audio transcript: {a['transcript']}")
         if a.get("drawing_text"): lines.append(f"Drawing: {a['drawing_text']}")
     return lines
