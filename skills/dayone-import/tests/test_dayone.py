@@ -7,7 +7,7 @@ hand-built JPEG bytes, and a stubbed journal-cli. Nothing touches Day One,
 Photos, Apple Journal, or plugin-data.
 """
 import datetime, importlib.util, io, json, os, shutil, sqlite3, struct, subprocess, sys, time
-import tempfile, types, unittest
+import tempfile, types, unittest, zoneinfo
 from contextlib import redirect_stdout, redirect_stderr
 from unittest import mock
 
@@ -583,14 +583,41 @@ class ImportTests(Tmp):
             self.run_import(cli)
         self.assertEqual(cli.writes, [])
 
+    def test_dst_offsets_from_one_import_zone_are_accepted(self):
+        # Imported in Los Angeles, checked in UTC: winter entries are 8h off,
+        # summer ones 7h. Same import, same zone.
+        os.environ["TZ"] = "UTC"; time.tzset()
+        self.addCleanup(lambda: (os.environ.pop("TZ", None), time.tzset()))
+        la = zoneinfo.ZoneInfo("America/Los_Angeles")
+        e1 = {"local": "2023-01-10 09:00:00", "utc": "2023-01-10 17:00:00",
+              "title": "Winter", "body": "cold walk"}
+        e2 = {"local": "2023-07-10 09:00:00", "utc": "2023-07-10 16:00:00",
+              "title": "Summer", "body": "warm walk"}
+        def at(e):
+            n = datetime.datetime.strptime(e["local"], "%Y-%m-%d %H:%M:%S")
+            return int(n.replace(tzinfo=la).timestamp())
+        rows = [{"id": 1, "epoch": at(e1), "title": "Winter", "text": "cold walk"},
+                {"id": 2, "epoch": at(e2), "title": "Summer", "text": "warm walk"}]
+        zones = di._import_zones(list(zip([e1, e2], rows)))
+        for e, row in zip([e1, e2], rows):     # both writes are explained
+            self.assertTrue(any(di._wrote_at(row["epoch"], e, z) for z in zones), zones)
+        # Without the UTC strings to lean on, Los Angeles is what explains both.
+        e1u, e2u = dict(e1, utc=None), dict(e2, utc=None)
+        self.assertIn(("local", "America/Los_Angeles"),
+                      di._import_zones(list(zip([e1u, e2u], rows))))
+        stray = dict(rows[1], epoch=rows[1]["epoch"] + 900)
+        self.assertFalse(any(di._wrote_at(stray["epoch"], e2, z) for z in zones))
+
     def test_legacy_ledger_survives_a_timezone_change(self):
-        # Imported in one zone (the entry landed 8h off today's wall clock),
-        # verified in another: still the same write.
+        # Imported in one zone, verified in another: still the same write.
         path = self._legacy_ledger({"A" * 32: 100})
         cli = FakeCLI()
         local = self._local_date("A" * 32)
         cli.add(local, "First", "body one", pk=100)
-        cli.store[-1]["epoch"] += 8 * 3600
+        # The import ran while the Mac was set to Tokyo: --date was read there.
+        naive = datetime.datetime.strptime(local, "%Y-%m-%d %H:%M:%S")
+        cli.store[-1]["epoch"] = int(naive.replace(
+            tzinfo=zoneinfo.ZoneInfo("Asia/Tokyo")).timestamp())
         self.run_import(cli)
         self.assertEqual(len(cli.writes), 2)
 
