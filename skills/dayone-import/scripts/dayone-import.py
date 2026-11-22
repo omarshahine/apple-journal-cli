@@ -176,7 +176,8 @@ def verify_legacy(args, state, state_path, entries):
         if retag and not getattr(args, "dry_run", False):
             save_state(state_path, state)    # add the fields older tags lack
         return
-    rows = {r["id"]: r for r in _destination_rows(args.cli, args.target_db)}
+    listed = _destination_rows(args.cli, args.target_db)
+    rows = {r["id"]: r for r in listed}
     by_uuid = {e["uuid"]: e for e in entries}
     bad, checked = [], 0
     for uuid, pk in state["done"].items():
@@ -184,7 +185,10 @@ def verify_legacy(args, state, state_path, entries):
             continue                         # older "True" marks carry no id
         checked += 1
         e, row = by_uuid.get(uuid), rows.get(pk)
-        if e is None or row is None or not _same_write(row["epoch"], e):
+        # Same instant (allowing a time-zone change) AND the same words: a
+        # rehearsal id that lands on some other entry fails one or the other.
+        if (e is None or row is None or not _same_write(row["epoch"], e)
+                or not _same_content(row, e)):
             bad.append((uuid, pk))
     if bad:
         die("ledger %s predates destination tagging, and %d of its entries do "
@@ -198,6 +202,24 @@ def verify_legacy(args, state, state_path, entries):
         die("ledger %s predates destination tagging and records no entry ids, "
             "so it cannot be checked against %s. Move it aside to import from "
             "scratch, or pass --state." % (state_path, _target_id(args.target_db)))
+    # Id-less marks are not trusted on the ledger's word: find each one in the
+    # destination by instant and words. Found, it gets its id; not found, the
+    # mark goes and the entry is imported (a duplicate is recoverable, a
+    # skipped entry is silently missing).
+    claimed = _claimed(state)
+    for uuid, pk in list(state["done"].items()):
+        if type(pk) is int:
+            continue
+        e = by_uuid.get(uuid)
+        hits = [r for r in listed if e is not None and r["id"] not in claimed
+                and _same_write(r["epoch"], e) and _same_content(r, e)]
+        if len(hits) == 1:
+            state["done"][uuid] = hits[0]["id"]
+            claimed.add(hits[0]["id"])
+        else:
+            del state["done"][uuid]
+            print("ledger: could not confirm Day One %s in %s; it will be imported"
+                  % (uuid, _target_id(args.target_db)))
     if not getattr(args, "dry_run", False):
         save_state(state_path, state)        # now tagged: verified once
 
@@ -357,8 +379,28 @@ def _destination_rows(cli, target_db):
         die("could not list destination entries to reconcile the ledger: %s"
             % (r.stderr or r.stdout).strip())
     return [{"id": x["id"], "epoch": _wall_epoch(x.get("date")),
-             "fp": _fingerprint(x.get("title"), x.get("text"))}
+             "fp": _fingerprint(x.get("title"), x.get("text")),
+             "content": _norm((x.get("title") or "") + (x.get("text") or ""))}
             for x in json.loads(r.stdout)]
+
+
+def _norm(s):
+    """Letters and digits only, lowercased: survives Markdown vs rendered text."""
+    return re.sub(r"[\W_]+", "", s or "").lower()
+
+
+def _same_content(row, e):
+    """Whether a destination entry carries this Day One entry's words.
+
+    Early imports wrote raw Markdown and later ones rendered it, so compare
+    letters and digits only, against both forms, by the opening 40 of each
+    field. An entry with no words matches only an entry with none.
+    """
+    probes = [_norm(e.get(k))[:40] for k in ("title", "title_md", "body", "body_md")]
+    probes = [p for p in probes if p]
+    if not probes:
+        return not row["content"]
+    return any(p in row["content"] for p in probes)
 
 
 def _landed(info, rows, claimed):

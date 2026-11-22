@@ -509,6 +509,37 @@ class ImportTests(Tmp):
         self.assertEqual(led["meta"]["target"], "live")
         self.assertNotIn("_legacy", led)
 
+    def test_legacy_mapping_to_a_different_entry_a_quarter_hour_off_is_refused(self):
+        # Instant alone could line up by chance; the words cannot.
+        self._legacy_ledger({"A" * 32: 42})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "Groceries", "milk and eggs", pk=42)
+        cli.store[-1]["epoch"] += 900
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
+    def test_legacy_ledger_written_as_raw_markdown_is_adopted(self):
+        # Early imports wrote Day One's Markdown through as plain text.
+        self._legacy_ledger({"A" * 32: 100})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "# First", "**body** one", pk=100)
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 2)
+
+    def test_idless_marks_are_confirmed_or_dropped(self):
+        path = self._legacy_ledger({"A" * 32: 100, "B" * 32: True, "C" * 32: True})
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "First", "body one", pk=100)
+        cli.add(self._local_date("B" * 32), "Second", "body two", pk=101)
+        self.run_import(cli)
+        # B is found and gets its id; C was never written, so it is imported.
+        self.assertEqual(len(cli.writes), 1)
+        with open(path) as fh:
+            done = json.load(fh)["done"]
+        self.assertEqual(done["B" * 32], 101)
+        self.assertEqual(type(done["C" * 32]), int)
+
     def test_legacy_ledger_survives_a_timezone_change(self):
         # Imported in one zone (the entry landed 8h off today's wall clock),
         # verified in another: still the same write.
