@@ -38,8 +38,8 @@ MOMENT_RE = re.compile(
 # backslash and a live "!"), so each pattern captures the even run in front
 # (group "lead") and keeps it when the reference is removed.
 _LEAD = r"(?<!\\)(?P<lead>(?:\\\\)*)"
-_MOMENT_LIVE_RE = re.compile(_LEAD + MOMENT_RE.pattern)
 _MOMENT_ANY_RE = re.compile(_LEAD + r"!\[\]\(dayone-moment:[^)\s]*\)")
+_MOMENT_ID = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{32}(?![0-9A-Fa-f])")
 
 
 def die(msg):
@@ -232,7 +232,14 @@ def _split_moments(md):
             blanks = 0
             out.append(line)
             continue
-        refs.extend(m.group(2) for m in _MOMENT_LIVE_RE.finditer(line))
+        # Every reference that is removed is also reported, so none can vanish
+        # unaccounted for: its 32-hex id when it has one (any kind, including
+        # pdfAttachment), else the reference itself, which then reads as
+        # missing rather than silently disappearing.
+        for m in _MOMENT_ANY_RE.finditer(line):
+            ref = m.group(0)[len(m.group("lead")):]
+            hexid = _MOMENT_ID.search(ref)
+            refs.append(hexid.group(0) if hexid else ref)
         line = _MOMENT_ANY_RE.sub(lambda m: m.group("lead"), line)
         # Same rule as before for prose: runs of empty lines collapse to one
         # (a whitespace-only line is not empty, and stays).
