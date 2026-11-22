@@ -9,10 +9,12 @@ blob), which Day One's own markdown export throws away -- it renders every
 date in the exporting machine's zone instead. That loss is the main reason
 this module reads the store directly.
 
-Read-only: the store is copied to a temp file before any query, so Day One
-may stay open.
+Read-only: queries run against a snapshot taken with SQLite's online backup
+API, so Day One may stay open. The snapshot lives in a temp folder that is
+removed when its connection closes (and at exit, for any left open).
 """
-import os, re, sys, json, shutil, sqlite3, plistlib, tempfile, datetime
+import os, re, sys, json, atexit, shutil, sqlite3, plistlib, tempfile, datetime
+from urllib.parse import quote
 
 try:
     import zoneinfo
@@ -37,24 +39,90 @@ def die(msg):
     sys.exit(1)
 
 
-def snapshot(db_path):
-    """Copy the store (plus -wal/-shm) somewhere safe and return the copy."""
-    if not os.path.exists(db_path):
-        die("no Day One store at %s\n  Is Day One installed and synced?" % db_path)
-    tmp = tempfile.mkdtemp(prefix="dayone-")
-    out = os.path.join(tmp, "DayOne.sqlite")
-    for suffix in ("", "-wal", "-shm"):
-        src = db_path + suffix
-        if os.path.exists(src):
-            shutil.copy2(src, out + suffix)
-    return out
+# Temp folders behind open snapshot connections; whatever is still here at
+# exit (a crash, a caller that never closed) is removed then.
+_SNAPSHOT_DIRS = set()
+
+
+def _drop_snapshot_dir(d):
+    if d:
+        _SNAPSHOT_DIRS.discard(d)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+atexit.register(lambda: [_drop_snapshot_dir(d) for d in list(_SNAPSHOT_DIRS)])
+
+
+class SnapshotConnection(sqlite3.Connection):
+    """A read-only connection to a private snapshot; closing it removes the copy.
+
+    Also usable as `with ... as con:`, which (unlike a plain sqlite3
+    connection) closes it on the way out.
+    """
+    snapshot_dir = None
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            _drop_snapshot_dir(self.snapshot_dir)
+            self.snapshot_dir = None
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+def snapshot_connect(src, prefix="snapshot-"):
+    """Open a consistent, private, read-only copy of the SQLite store at `src`.
+
+    Copying the database, -wal and -shm one after another can mix
+    generations if the app checkpoints in between. The online backup API
+    reads every page inside one read transaction of a read-only source
+    connection instead, and never writes the source. Raises sqlite3.Error
+    (or OSError) when the source cannot be read; the temp folder is removed
+    on any failure.
+    """
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    _SNAPSHOT_DIRS.add(tmp)
+    try:
+        dst = os.path.join(tmp, os.path.basename(src))
+        source = sqlite3.connect("file:%s?mode=ro" % quote(os.path.abspath(src)),
+                                 uri=True, timeout=5)
+        try:
+            out = sqlite3.connect(dst)
+            try:
+                source.backup(out)
+                # The copy inherits the source's WAL mode, and a WAL database
+                # cannot be opened read-only without its -shm. A private
+                # snapshot needs no WAL, so make it a plain rollback-journal file.
+                out.execute("pragma journal_mode=delete")
+            finally:
+                out.close()
+        finally:
+            source.close()
+        con = sqlite3.connect("file:%s?mode=ro" % quote(dst), uri=True,
+                              factory=SnapshotConnection)
+    except BaseException:
+        _drop_snapshot_dir(tmp)
+        raise
+    con.snapshot_dir = tmp
+    con.row_factory = sqlite3.Row
+    return con
 
 
 def connect(db_path=None):
-    con = sqlite3.connect("file:%s?mode=ro" % snapshot(db_path or DEFAULT_DB),
-                          uri=True)
-    con.row_factory = sqlite3.Row
-    return con
+    """A snapshot connection to the Day One store. Close it when done."""
+    db_path = db_path or DEFAULT_DB
+    if not os.path.exists(db_path):
+        die("no Day One store at %s\n  Is Day One installed and synced?" % db_path)
+    try:
+        return snapshot_connect(db_path, prefix="dayone-")
+    except (sqlite3.Error, OSError) as e:
+        if not os.access(db_path, os.R_OK):
+            die("cannot read %s. Grant Full Disk Access to this terminal, "
+                "then relaunch it." % db_path)
+        die("could not snapshot %s: %s" % (db_path, e))
 
 
 def journals(con):
@@ -105,6 +173,7 @@ _RULE = re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$")
 _BOLD_ITALIC = re.compile(r"(\*{1,3}|_{1,3})(\S(?:.*?\S)?)\1", re.S)
 _LINK = re.compile(r'\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
 _CODE_FENCE = re.compile(r"(?m)^[ \t]*```[^\n]*$")
+_TITLE_HEADING = re.compile(r"^#{1,6}[ \t]+")
 
 
 def markdown_to_inline_text(md):
@@ -123,20 +192,40 @@ def markdown_to_inline_text(md):
     return out.strip()
 
 
-def markdown_to_text(md):
-    """Flatten Day One markdown into what a plain-text reader should see."""
-    if not md:
-        return md
-    out = _CODE_FENCE.sub("", md)
-    out = _RULE.sub("", out)
+def _flatten_prose(text):
+    out = _RULE.sub("", text)
     out = _HEADING.sub("", out)
     # a link becomes "text (url)", or just the url when the text repeats it
     out = _LINK.sub(lambda m: m.group(2) if m.group(1).strip() in ("", m.group(2))
                     else "%s (%s)" % (m.group(1), m.group(2)), out)
     out = _BOLD_ITALIC.sub(lambda m: m.group(2), out)
-    out = _ESCAPED.sub(r"\1", out)
-    out = re.sub(r"\n{3,}", "\n\n", out)
-    return out.strip()
+    return _ESCAPED.sub(r"\1", out)
+
+
+def markdown_to_text(md):
+    """Flatten Day One markdown into what a plain-text reader should see.
+
+    Fenced code is kept verbatim: only the fence lines go. A "---" or "# x"
+    inside a fence is content, not a rule or heading, so it must not be
+    stripped (journal-cli's renderer treats it the same way).
+    """
+    if not md:
+        return md
+    chunks, cur, in_fence = [], [], False      # (is_code, text) runs
+    for line in md.split("\n"):
+        if _CODE_FENCE.fullmatch(line):
+            chunks.append((in_fence, "\n".join(cur)))
+            cur, in_fence = [], not in_fence
+            continue
+        cur.append(line)
+    chunks.append((in_fence, "\n".join(cur)))
+    out = []
+    for is_code, text in chunks:
+        if not is_code:
+            text = re.sub(r"\n{3,}", "\n\n", _flatten_prose(text)).strip("\n")
+        if text.strip():
+            out.append(text)
+    return "\n".join(out).strip()
 
 
 def _local(utc, tz):
@@ -191,6 +280,19 @@ def read_entries(con, journal_pk, media=None):
 
         md = e["ZMARKDOWNTEXT"] or ""
         files, audio, missing, seen = [], [], [], set()
+
+        def classify(ref, a):
+            if a["ZFORMAT"] == "aac" or (a["ZDURATION"] and not a["ZTYPE"]):
+                audio.append({"uuid": ref, "duration": a["ZDURATION"],
+                              "transcription": a["ZTRANSCRIPTION"]})
+                return
+            path = media.get((a["ZMD5"] or "").lower())
+            if path:
+                files.append(path)
+            else:
+                missing.append({"uuid": ref, "md5": a["ZMD5"],
+                                "reason": "media not downloaded"})
+
         for ref in (m.upper() for m in MOMENT_RE.findall(md)):
             a = by_id.get(ref)
             if a is None:
@@ -198,30 +300,27 @@ def read_entries(con, journal_pk, media=None):
                 # Day One itself lost it; nothing can recover these.
                 missing.append({"uuid": ref, "reason": "no attachment row"})
                 continue
-            seen.add(ref)
-            if a["ZFORMAT"] == "aac" or (a["ZDURATION"] and not a["ZTYPE"]):
-                audio.append({"uuid": ref, "duration": a["ZDURATION"],
-                              "transcription": a["ZTRANSCRIPTION"]})
+            if ref in seen:
                 continue
-            path = media.get((a["ZMD5"] or "").lower())
-            if path:
-                files.append(path)
-            else:
-                missing.append({"uuid": ref, "md5": a["ZMD5"],
-                                "reason": "media not downloaded"})
-        for a in atts:                      # defensive: unreferenced rows
+            seen.add(ref)
+            classify(ref, a)
+        # Rows the text never references still belong to the entry: body
+        # order first, then database order, and the same audio and
+        # missing-media handling as referenced ones.
+        for a in atts:
             i = (a["ZIDENTIFIER"] or "").upper()
             if i and i not in seen:
-                path = media.get((a["ZMD5"] or "").lower())
-                if path:
-                    files.append(path)
+                seen.add(i)
+                classify(i, a)
 
         prose = IMAGE_RE.sub("", md)
         prose = re.sub(r"\n{3,}", "\n\n", prose).strip()
         lines = prose.split("\n")
         title, body = None, prose
         if lines and lines[0].strip():
-            first = lines[0].strip().lstrip("#").strip()
+            # Only a real ATX heading marker ("# ", up to six hashes, then
+            # whitespace) is syntax; "#travel" is a literal title.
+            first = _TITLE_HEADING.sub("", lines[0].strip(), count=1).strip()
             # Day One has no title field; the export promotes line 1. When an
             # entry had no text at all, line 1 is just its own UUID.
             if re.fullmatch(r"[0-9A-Fa-f]{32}", first):

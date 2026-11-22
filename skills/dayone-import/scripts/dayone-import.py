@@ -15,7 +15,7 @@ hours -- sometimes a whole day -- off. Day One's SQLite store still has the
 original zone per entry, so this reads that directly and uses the export
 folder only as a source of image bytes.
 """
-import os, re, sys, json, shutil, sqlite3, argparse, collections, subprocess, datetime
+import os, re, sys, json, shutil, sqlite3, hashlib, argparse, collections, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dayone, exifgps, photoslib
@@ -27,8 +27,8 @@ from dayone import die
 # rest of this machine's tool state lives -- with a local cache for speed.
 # Writing over the network every few entries would stall a large import, so
 # the cache is authoritative during a run and published when it finishes.
-STATE_DIR = os.path.expanduser(
-    os.environ.get("DAYONE_IMPORT_STATE", "~/.local/state/dayone-import"))
+STATE_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("DAYONE_IMPORT_STATE", "~/.local/state/dayone-import")))
 PLUGIN_DATA = os.path.expanduser("~/.local/bin/plugin-data")
 REMOTE_PREFIX = "journal-cli/dayone-import"
 
@@ -79,32 +79,87 @@ def publish_state(path):
 
 # --------------------------------------------------------------- helpers
 
-def load_state(path):
-    if path:
+def _target_id(target_db):
+    """What a ledger's primary keys belong to: the real store, or one sandbox."""
+    return "live" if not target_db else os.path.realpath(
+        os.path.expanduser(target_db))
+
+
+def ledger_path(args, journal_name):
+    """The ledger for this source journal and this destination.
+
+    A rehearsal against a sandbox gets its own ledger, keyed by the sandbox
+    path. Sharing one with the live import made the live run skip every entry
+    the rehearsal wrote, and later commands target sandbox primary keys in
+    the real store. The live ledger keeps its original name, so ledgers from
+    earlier imports still load.
+    """
+    if args.state:
+        return os.path.abspath(os.path.expanduser(args.state))
+    stem = re.sub(r"\W+", "_", journal_name)
+    target = _target_id(getattr(args, "target_db", None))
+    if target != "live":
+        stem += ".sandbox-" + hashlib.sha1(target.encode("utf-8")).hexdigest()[:10]
+    return os.path.join(STATE_DIR, stem + ".json")
+
+
+def load_state(path, journal_name, target_db=None):
+    """Load a ledger and check it belongs to this journal and destination."""
+    target = _target_id(target_db)
+    if target == "live":
         pull_state(path)
-    if path and os.path.exists(path):
-        return json.load(open(path))
-    return {"done": {}, "failed": {}}
+    if os.path.exists(path):
+        with open(path) as fh:
+            state = json.load(fh)
+    else:
+        state = {}
+    state.setdefault("done", {})
+    state.setdefault("failed", {})
+    state.setdefault("pending", {})
+    meta = state.get("meta")
+    if meta:
+        if meta.get("journal") not in (None, journal_name):
+            die("ledger %s belongs to Day One journal %r, not %r. Pass --state "
+                "to choose another." % (path, meta["journal"], journal_name))
+        if meta.get("target") not in (None, target):
+            die("ledger %s records writes to %s, not %s. Rehearsal and live "
+                "imports keep separate ledgers; pass the matching --target-db "
+                "(or --state)." % (path, meta["target"], target))
+    state["meta"] = {"journal": journal_name, "target": target}
+    return state
 
 
 def save_state(path, state):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    """Atomically and durably replace the ledger (fsync file and folder)."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
     tmp = path + ".tmp"
-    json.dump(state, open(tmp, "w"), indent=1)
+    with open(tmp, "w") as fh:
+        json.dump(state, fh, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
+    try:
+        fd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def gather(args):
-    con = dayone.connect(args.db)
-    j = dayone.resolve_journal(con, args.journal)
-    # Day One's export splits media by kind; search every one it writes, not
-    # just photos/, or a journal with video comes up short whenever the app
-    # has not also cached the originals locally.
-    extra = ([os.path.join(args.export, d)
-              for d in ("photos", "videos", "audios", "pdfs")]
-             if args.export else [])
-    media = dayone.media_index(extra)
-    entries = dayone.read_entries(con, j["pk"], media)
+    with dayone.connect(args.db) as con:
+        j = dayone.resolve_journal(con, args.journal)
+        # Day One's export splits media by kind; search every one it writes,
+        # not just photos/, or a journal with video comes up short whenever
+        # the app has not also cached the originals locally.
+        extra = ([os.path.join(args.export, d)
+                  for d in ("photos", "videos", "audios", "pdfs")]
+                 if args.export else [])
+        media = dayone.media_index(extra)
+        entries = dayone.read_entries(con, j["pk"], media)
     return j, entries
 
 
@@ -116,8 +171,8 @@ def has_content(e):
 # ---------------------------------------------------------------- commands
 
 def cmd_journals(args):
-    con = dayone.connect(args.db)
-    rows = dayone.journals(con)
+    with dayone.connect(args.db) as con:
+        rows = dayone.journals(con)
     width = max(len(r["name"] or "") for r in rows) if rows else 4
     print("%-*s  %7s" % (width, "JOURNAL", "ENTRIES"))
     for r in rows:
@@ -171,12 +226,66 @@ def cmd_plan(args):
         print("\nmanifest -> %s" % args.json)
 
 
+def _list_dates(cli, target_db):
+    """[(id, date, title)] for every entry in the destination store."""
+    cmd = [cli] + (["--db", target_db] if target_db else []) + [
+        "list", "--limit", "1000000", "--include-empty", "--json"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode:
+        die("could not list destination entries to reconcile the ledger: %s"
+            % (r.stderr or r.stdout).strip())
+    return [(x["id"], x.get("date"), x.get("title") or "")
+            for x in json.loads(r.stdout)]
+
+
+def reconcile_pending(args, state, state_path, entries):
+    """Settle writes that were in flight when a previous run stopped.
+
+    Each write is marked pending in the ledger before journal-cli runs and
+    moved to done right after it succeeds. A pending mark left behind means
+    the run stopped in between, so the entry may or may not have landed.
+    Look for it in the destination by its exact date before deciding.
+    """
+    pending = state["pending"]
+    if not pending:
+        return
+    by_uuid = {e["uuid"]: e for e in entries}
+    claimed = {v for v in state["done"].values() if type(v) is int}
+    rows = _list_dates(args.cli, args.target_db)
+    for uuid, info in list(pending.items()):
+        e = by_uuid.get(uuid)
+        hits = [r for r in rows if r[1] == info.get("date") and r[0] not in claimed]
+        if len(hits) > 1 and e is not None:
+            want = dayone.markdown_to_inline_text(e.get("title") or "") or ""
+            hits = [r for r in hits if r[2] == want] or hits
+        if len(hits) == 1:
+            state["done"][uuid] = hits[0][0]
+            claimed.add(hits[0][0])
+            print("reconciled: %s already landed as entry %d" % (uuid, hits[0][0]))
+        elif hits:
+            die("cannot tell which of entries %s is Day One entry %s (an "
+                "interrupted write). Check them in Journal, then record the "
+                "right one in %s under \"done\" and remove it from \"pending\"."
+                % (", ".join(str(h[0]) for h in hits), uuid, state_path))
+        else:
+            print("reconciled: %s never landed; it will be written" % uuid)
+        del pending[uuid]
+    save_state(state_path, state)
+
+
 def cmd_import(args):
     j, entries = gather(args)
     target = args.into or j["name"]
-    state_path = args.state or os.path.join(
-        STATE_DIR, re.sub(r"\W+", "_", j["name"]) + ".json")
-    state = load_state(state_path)
+    state_path = ledger_path(args, j["name"])
+    state = load_state(state_path, j["name"], args.target_db)
+    if not args.dry_run:
+        # Prove the ledger can be written before touching the destination:
+        # a write the ledger cannot record is a write a re-run repeats.
+        try:
+            save_state(state_path, state)
+        except OSError as e:
+            die("cannot write the import ledger %s: %s" % (state_path, e))
+        reconcile_pending(args, state, state_path, entries)
 
     todo = [e for e in entries if has_content(e)
             and e["uuid"] not in state["done"]]
@@ -218,11 +327,15 @@ def cmd_import(args):
         # Hand over the raw markdown: journal-cli --markdown renders it into
         # Journal's rich text, so headings and emphasis become real formatting
         # instead of literal "###### " in the finished entry.
-        if e["title"]:
-            cmd += ["--title", e.get("title_md") or e["title"]]
-        if e["body"]:
-            cmd += ["--body", e.get("body_md") or e["body"]]
-        if e["title"] or e["body"]:
+        # Decide on the raw markdown, not on the flattened text: the renderer
+        # in journal-cli is what knows whether a field renders to nothing.
+        title_md = e.get("title_md") if e.get("title_md") is not None else e["title"]
+        body_md = e.get("body_md") if e.get("body_md") is not None else e["body"]
+        if title_md:
+            cmd += ["--title", title_md]
+        if body_md:
+            cmd += ["--body", body_md]
+        if title_md or body_md:
             cmd += ["--markdown"]
         if e["starred"]:
             cmd += ["--bookmark"]
@@ -244,14 +357,22 @@ def cmd_import(args):
         sys.stdout.write("[%4d/%d] %s  %s\n" % (n, len(todo), when[:16], label))
         sys.stdout.flush()
 
+        if not args.dry_run:
+            # Marked before the write, cleared right after it: if the run
+            # dies in between, the next run reconciles instead of guessing.
+            state["pending"][e["uuid"]] = {"date": when}
+            save_state(state_path, state)
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             fail += 1
             err = (r.stderr or r.stdout).strip().split("\n")[-1]
             sys.stderr.write("          FAILED: %s\n" % err)
-            state["failed"][e["uuid"]] = err
-            if fail >= args.max_failures:
+            if not args.dry_run:
+                # journal-cli rolls a failed write back, so nothing landed.
+                state["pending"].pop(e["uuid"], None)
+                state["failed"][e["uuid"]] = err
                 save_state(state_path, state)
+            if fail >= args.max_failures:
                 die("stopping after %d failures; state saved to %s"
                     % (fail, state_path))
             continue
@@ -260,14 +381,15 @@ def cmd_import(args):
             m = re.search(r"entry (\d+)", r.stdout)
             state["done"][e["uuid"]] = int(m.group(1)) if m else True
             state["failed"].pop(e["uuid"], None)
-            if n % 10 == 0:
-                save_state(state_path, state)
+            state["pending"].pop(e["uuid"], None)
+            save_state(state_path, state)
         if live and args.prune_backups and n % 25 == 0:
             _prune_backups(backups_before)
 
     if not args.dry_run:
         save_state(state_path, state)
-        publish_state(state_path)
+        if live:                        # rehearsal ledgers stay on this Mac
+            publish_state(state_path)
     if live and args.prune_backups:
         _prune_backups(backups_before)
 
@@ -335,11 +457,19 @@ def _photo_fix(entry):
     scattered along the route, and its location should be where it began, not
     the middle of the journey.
     """
-    pts = [g for g in (exifgps.read(m) for m in entry["media"]) if "lat" in g]
+    pts = []
+    for m in entry["media"]:
+        try:
+            g = exifgps.read(m)
+        except Exception as ex:          # one damaged photo must not stop the audit
+            sys.stderr.write("note: skipping unreadable EXIF in %s (%s)\n" % (m, ex))
+            continue
+        if "lat" in g:
+            pts.append(g)
     if not pts:
         return None
     anchor = pts[0]
-    dated = [p for p in pts if p.get("when")]
+    dated = [p for p in pts if p.get("when") and exifgps._valid_when(p["when"])]
     if dated and entry.get("local"):
         try:
             t0 = datetime.datetime.strptime(entry["local"], "%Y-%m-%d %H:%M:%S")
@@ -354,9 +484,8 @@ def _photo_fix(entry):
 
 def cmd_fix_locations(args):
     j, entries = gather(args)
-    state_path = args.state or os.path.join(
-        STATE_DIR, re.sub(r"\W+", "_", j["name"]) + ".json")
-    state = load_state(state_path)
+    state_path = ledger_path(args, j["name"])
+    state = load_state(state_path, j["name"], args.target_db)
     if not state["done"]:
         die("no import state at %s -- run `import` first" % state_path)
 
@@ -364,6 +493,14 @@ def cmd_fix_locations(args):
     if con is None:
         sys.stderr.write("note: no Photos library found; coordinates will be "
                          "corrected without place names.\n")
+    try:
+        _fix_locations(args, entries, state, con)
+    finally:
+        if con is not None:
+            con.close()
+
+
+def _fix_locations(args, entries, state, con):
 
     fixes, skipped_unverified = [], []
     for e in entries:
@@ -540,9 +677,8 @@ def cmd_fix_text(args):
     original markdown using journal-cli --markdown.
     """
     j, entries = gather(args)
-    state_path = args.state or os.path.join(
-        STATE_DIR, re.sub(r"\W+", "_", j["name"]) + ".json")
-    state = load_state(state_path)
+    state_path = ledger_path(args, j["name"])
+    state = load_state(state_path, j["name"], args.target_db)
     if not state["done"]:
         die("no import state at %s -- run `import` first" % state_path)
 
@@ -684,10 +820,10 @@ def cmd_fix_export(args):
     root = args.export
     if not os.path.isdir(root):
         die("no such export directory: %s" % root)
-    con = dayone.connect(args.db)
-    j = dayone.resolve_journal(con, args.journal)
-    entries = {e["uuid"].upper(): e
-               for e in dayone.read_entries(con, j["pk"], {})}
+    with dayone.connect(args.db) as con:
+        j = dayone.resolve_journal(con, args.journal)
+        entries = {e["uuid"].upper(): e
+                   for e in dayone.read_entries(con, j["pk"], {})}
 
     files = []
     for r, _d, fs in os.walk(root):
@@ -881,7 +1017,8 @@ def main():
                         "stores a hidden map only in an entry's CRDT, so there is no "
                         "'off' journal-cli can write")
     s.add_argument("--limit", type=int)
-    s.add_argument("--state", help="resume file (default: ~/.local/state/...)")
+    s.add_argument("--state", help="import ledger (default: one per journal and "
+                                   "destination under ~/.local/state/dayone-import)")
     s.add_argument("--max-failures", type=int, default=5)
     s.add_argument("--prune-backups", action="store_true",
                    help="trash the per-write store snapshots as they pile up")
