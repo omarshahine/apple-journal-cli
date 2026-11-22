@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.6
+
+### Fixed: dayone-import legacy ledgers check content too
+
+([#25](https://github.com/omarshahine/apple-journal-cli/pull/25)) Verifying a
+pre-1.4.4 ledger now also requires each recorded entry's title and body to
+match the destination entry, raw Markdown or rendered, so an unrelated entry
+at a nearby time is never adopted. Old marks without an entry id are looked
+up the same way: confirmed ones get their id, the rest are imported instead of
+silently skipped.
+
 ## 1.4.5
 
 ### Fixed: dayone-import skill
