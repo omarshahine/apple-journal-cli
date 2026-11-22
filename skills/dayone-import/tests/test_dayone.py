@@ -222,6 +222,38 @@ class SnapshotTests(Tmp):
         self.assertIsNotNone(photoslib.match(con, wall, -17.0, -179.9995))
         self.assertIsNone(photoslib.match(con, wall, -17.0, 170.0))
 
+    def test_match_near_a_pole_keeps_nearby_longitudes(self):
+        con = sqlite3.connect(":memory:")
+        con.row_factory = sqlite3.Row
+        con.executescript("""
+            create table ZASSET (Z_PK integer primary key, ZUUID, ZLATITUDE,
+                ZLONGITUDE, ZTRASHEDDATE, ZDATECREATED);
+            create table ZADDITIONALASSETATTRIBUTES (ZASSET, ZREVERSELOCATIONDATA,
+                ZORIGINALFILENAME, ZTIMEZONENAME, ZTIMEZONEOFFSET);
+        """)
+        wall = "2024-03-01 12:00:00"
+        target = datetime.datetime(2024, 3, 1, 12, tzinfo=datetime.timezone.utc).timestamp() - CD
+        # At 89 degrees, 0.1 degrees of longitude is under 200 m.
+        con.execute("insert into ZASSET values (1, 'POLE', 89.0, 0.1, NULL, ?)", (target,))
+        con.execute("insert into ZADDITIONALASSETATTRIBUTES values (1, NULL, 'p.jpg', 'UTC', 0)")
+        hit = photoslib.match(con, wall, 89.0, 0.0)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["uuid"], "POLE")
+        # A window reaching the pole takes every longitude.
+        con.execute("update ZASSET set ZLATITUDE = 89.999, ZLONGITUDE = 120.0")
+        self.assertIsNotNone(photoslib.match(con, wall, 89.999, -60.0))
+
+    def test_malformed_place_archives_are_ignored(self):
+        # Decodable but the wrong shape: $objects must be a list.
+        self.assertEqual(photoslib.parse_place(plistlib.dumps({"$objects": "oops"})), {})
+        self.assertEqual(photoslib.parse_place(plistlib.dumps({"$objects": 5})), {})
+        self.assertEqual(photoslib.parse_place(plistlib.dumps(["not", "a", "dict"])), {})
+        objs = ["$null", {"placeType": 1, "name": plistlib.UID(2), "area": "huge"}, "Plaza",
+                {"placeType": 2, "name": plistlib.UID(4), "area": 12.5}, "Fountain"]
+        blob = plistlib.dumps({"$objects": objs}, fmt=plistlib.FMT_BINARY)
+        self.assertEqual(photoslib.parse_place(blob)["place"],
+                         "Fountain")
+
     def test_match_rejects_an_invalid_wall_clock(self):
         con = sqlite3.connect(":memory:")
         self.assertIsNone(photoslib.match(con, "0000-00-00 00:00:00", 47.6, -122.3))
@@ -377,6 +409,30 @@ class TextTests(Tmp):
         self.assertEqual(e["local"], "2019-06-23 08:41:13")
         self.assertIsNone(e["local_legacy"])
 
+    def test_tilde_fences_keep_attachment_syntax_literal(self):
+        ref = "![](dayone-moment://0123456789ABCDEF0123456789ABCDEF)"
+        e = self.entries("Notes\n~~~\n%s\n```\n~~~\nafter" % ref)[0]
+        self.assertIn(ref, e["body_md"])
+        self.assertEqual(e["missing"], [])
+        self.assertIn(ref, e["body"])
+        self.assertIn("```", e["body"])               # a backtick run inside stays content
+        self.assertEqual(dayone.markdown_to_text("~~~~\n~~~\n---\n~~~~"), "~~~\n---")
+
+    def test_media_beside_the_selected_store_is_found(self):
+        store_dir = self.p("copied")
+        os.makedirs(os.path.join(store_dir, "DayOnePhotos"))
+        md5 = "a" * 32
+        photo = os.path.join(store_dir, "DayOnePhotos", md5 + ".jpeg")
+        open(photo, "wb").close()
+        idx = dayone.media_index((), os.path.join(store_dir, "DayOne.sqlite"))
+        self.assertEqual(idx.get(md5), photo)
+        # An export folder still wins.
+        exp = self.p("exp")
+        os.makedirs(exp)
+        open(os.path.join(exp, md5 + ".jpeg"), "wb").close()
+        self.assertEqual(dayone.media_index((exp,), os.path.join(store_dir, "DayOne.sqlite"))[md5],
+                         os.path.join(exp, md5 + ".jpeg"))
+
     def test_longer_fence_keeps_a_shorter_fence_as_content(self):
         md = "````\n```\n---\n````"
         self.assertEqual(dayone.markdown_to_text(md), "```\n---")
@@ -460,7 +516,9 @@ class FakeCLI:
     `render` echoes its input (enough to make content fingerprints line up),
     `write` reads --date as a wall clock in the current zone like the real
     CLI and appends to `store`, and `list` prints each entry's date in the
-    *current* zone, so a timezone change between runs shows up as it would.
+    *current* zone (or in UTC when run with TZ=UTC, as the real CLI honors),
+    so a timezone change between runs shows up as it would. Each entry has a
+    Journal entry UUID, as the real `list --json` reports.
     """
 
     def __init__(self, die_on_write=None, fail_after_commit=None):
@@ -469,11 +527,12 @@ class FakeCLI:
         self.fail_after_commit = fail_after_commit    # commit, then exit 1
         self.next_pk = 100
 
-    def add(self, date, title="", text="", pk=None):
+    def add(self, date, title="", text="", pk=None, uuid=None):
         pk = pk if pk is not None else self.next_pk
         self.next_pk = max(self.next_pk, pk + 1)
         self.store.append({"id": pk, "epoch": di._wall_epoch(date),
-                           "title": title, "text": text})
+                           "title": title, "text": text,
+                           "uuid": uuid or "J%031d" % pk})
         return pk
 
     def __call__(self, cmd, *a, **kw):
@@ -497,9 +556,11 @@ class FakeCLI:
                 return subprocess.CompletedProcess(cmd, 1, "", "killed after commit")
             return subprocess.CompletedProcess(cmd, 0, "Created entry %d." % pk, "")
         if verb == "list":
-            rows = [{"id": r["id"], "title": r["title"], "text": r["text"],
-                     "date": time.strftime("%Y-%m-%d %H:%M:%S",
-                                           time.localtime(r["epoch"]))}
+            utc = (kw.get("env") or {}).get("TZ") == "UTC"
+            clock = time.gmtime if utc else time.localtime
+            rows = [{"id": r["id"], "uuid": r["uuid"], "title": r["title"],
+                     "text": r["text"],
+                     "date": time.strftime("%Y-%m-%d %H:%M:%S", clock(r["epoch"]))}
                     for r in self.store]
             return subprocess.CompletedProcess(cmd, 0, json.dumps(rows), "")
         raise AssertionError("unexpected journal-cli call: %r" % cmd)
@@ -513,6 +574,9 @@ def set_tz(name):
 class ImportTests(Tmp):
     def setUp(self):
         super().setUp()
+        patcher = mock.patch.object(di, "REAL_STORE", self.p("no-real-store.sqlite"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.db = self.p("DayOne.sqlite")
         make_dayone(self.db, [
             (1, "A" * 32, 1700000000, "First\nbody one"),
@@ -928,17 +992,153 @@ class ImportTests(Tmp):
             json.dump({"done": {}, "meta": {"journal": "Travel", "target": "live"}}, fh)
         calls = []
 
+        ident = {"journal": "Travel", "target": "live"}
+        rel = di._remote_key(local, ident).partition("/")[2]
+
         def remote(args, *extra, **kw):
             calls.append(args[0])
+            if args[0] == "list":
+                return json.dumps({"keys": [{"key": rel}]})
             if args[0] == "get":
                 return json.dumps({"done": {"X": 1},
                                    "meta": {"journal": "Other", "target": "live"}})
             return "ok"
         err = io.StringIO()
         with mock.patch.object(di, "_remote", remote), redirect_stderr(err):
-            di.publish_state(local, {"journal": "Travel", "target": "live"})
+            di.publish_state(local, ident)
         self.assertNotIn("put", calls)
         self.assertIn("another import", err.getvalue())
+
+    def _store(self, name, store_uuid):
+        f = self.p(name)
+        c = sqlite3.connect(f)
+        c.execute("create table Z_METADATA (Z_VERSION, Z_UUID, Z_PLIST)")
+        c.execute("insert into Z_METADATA values (1, ?, NULL)", (store_uuid,))
+        c.commit(); c.close()
+        return f
+
+    def _tagged_ledger(self, done, store, dest=None):
+        path = di.ledger_path(self.args(), "Travel")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        meta = {"journal": "Travel", "target": "live", "source": di._source_id(self.db)}
+        if store:
+            meta["store"] = store
+        with open(path, "w") as fh:
+            json.dump({"done": done, "failed": {}, "pending": {}, "meta": meta,
+                       "dest": dest or {}}, fh)
+        return path
+
+    def test_ledger_from_another_store_is_remapped_by_entry_uuid(self):
+        # Restored on another Mac: same paths, different store. Entry 100 was
+        # A's id there; here A synced in as entry 555.
+        mock.patch.object(di, "REAL_STORE", self._store("here.sqlite", "STORE-HERE")).start()
+        self.addCleanup(mock.patch.stopall)
+        path = self._tagged_ledger({"A" * 32: 100}, "STORE-THERE", {"A" * 32: "J-SYNCED-A"})
+        cli = FakeCLI()
+        cli.add("2020-01-01 00:00:00", "unrelated", "x", pk=100)
+        cli.add(self._local_date("A" * 32), "First", "body one", pk=555, uuid="J-SYNCED-A")
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 2)          # B and C only
+        with open(path) as fh:
+            led = json.load(fh)
+        self.assertEqual(led["done"]["A" * 32], 555)
+        self.assertEqual(led["meta"]["store"], "STORE-HERE")
+
+    def test_pending_write_from_another_store_settles_below_its_old_floor(self):
+        # B was interrupted on the other Mac after landing there (floor 900);
+        # it synced in here as entry 50, below that floor.
+        mock.patch.object(di, "REAL_STORE", self._store("here.sqlite", "STORE-HERE")).start()
+        self.addCleanup(mock.patch.stopall)
+        path = self._tagged_ledger({"A" * 32: 100}, "STORE-THERE", {"A" * 32: "J-A"})
+        with open(path) as fh:
+            led = json.load(fh)
+        b_date = self._local_date("B" * 32)
+        led["pending"] = {"B" * 32: {"date": b_date, "epoch": di._wall_epoch(b_date),
+                                     "epochs": di._wall_epochs(b_date), "floor_pk": 900,
+                                     "fp": di._fingerprint("Second", "body two")}}
+        with open(path, "w") as fh:
+            json.dump(led, fh)
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "First", "body one", pk=555, uuid="J-A")
+        cli.add(b_date, "Second", "body two", pk=50, uuid="J-B")
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 1)          # only C: B was not duplicated
+        with open(path) as fh:
+            self.assertEqual(json.load(fh)["done"]["B" * 32], 50)
+
+    def test_uuids_collected_on_a_run_with_nothing_to_write_are_saved(self):
+        cli = FakeCLI()
+        self.run_import(cli)
+        path = di.ledger_path(self.args(), "Travel")
+        with open(path) as fh:
+            led = json.load(fh)
+        led["dest"] = {}
+        with open(path, "w") as fh:
+            json.dump(led, fh)
+        self.run_import(cli)                          # everything already done
+        with open(path) as fh:
+            self.assertEqual(len(json.load(fh)["dest"]), 3)
+
+    def test_ledger_from_another_store_without_entry_uuids_is_refused(self):
+        mock.patch.object(di, "REAL_STORE", self._store("here.sqlite", "STORE-HERE")).start()
+        self.addCleanup(mock.patch.stopall)
+        self._tagged_ledger({"A" * 32: 100}, "STORE-THERE")
+        cli = FakeCLI()
+        cli.add("2020-01-01 00:00:00", "unrelated", "x", pk=100)
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
+    def test_store_less_tag_is_verified_before_use(self):
+        # Tagged before ledgers recorded their store: entry 100 here is
+        # something else, so the ledger must not be trusted on its word.
+        mock.patch.object(di, "REAL_STORE", self._store("here.sqlite", "STORE-HERE")).start()
+        self.addCleanup(mock.patch.stopall)
+        self._tagged_ledger({"A" * 32: 100}, None)
+        cli = FakeCLI()
+        cli.add("2020-01-01 00:00:00", "unrelated", "x", pk=100)
+        with self.assertRaises(SystemExit):
+            self.run_import(cli)
+        self.assertEqual(cli.writes, [])
+
+    def test_import_records_entry_uuids(self):
+        cli = FakeCLI()
+        self.run_import(cli)
+        with open(di.ledger_path(self.args(), "Travel")) as fh:
+            led = json.load(fh)
+        self.assertEqual(set(led["dest"]), {"A" * 32, "B" * 32, "C" * 32})
+
+    def test_destination_instants_survive_a_dst_fold(self):
+        # 05:30Z and 06:30Z both read 01:30:00 in New York on 2024-11-03.
+        before = os.environ.get("TZ")
+        self.addCleanup(lambda: (os.environ.__setitem__("TZ", before) if before
+                                 else os.environ.pop("TZ", None), time.tzset()))
+        set_tz("America/New_York")
+        cli = FakeCLI()
+        cli.store += [{"id": 1, "uuid": "J1", "title": "", "text": "", "epoch": 1730611800},
+                      {"id": 2, "uuid": "J2", "title": "", "text": "", "epoch": 1730615400}]
+        with mock.patch.object(di.subprocess, "run", cli):
+            rows = di._destination_rows("journal-cli", None)
+        self.assertEqual(sorted(r["epoch"] for r in rows), [1730611800, 1730615400])
+        self.assertEqual(di._wall_epochs("2024-11-03 01:30:00"), [1730611800, 1730615400])
+        info = {"date": "2024-11-03 01:30:00", "epochs": di._wall_epochs("2024-11-03 01:30:00"),
+                "floor_pk": 0, "fp": None}
+        self.assertEqual(len(di._landed(info, [rows[1]], set())), 1)
+
+    def test_publish_skips_when_the_remote_cannot_be_checked(self):
+        local = self.p("Travel.json")
+        with open(local, "w") as fh:
+            json.dump({"done": {}, "meta": {"journal": "Travel", "target": "live"}}, fh)
+        calls = []
+
+        def remote(args, *extra, **kw):
+            calls.append(args[0])
+            return None if args[0] in ("list", "get") else "ok"   # lookup fails
+        err = io.StringIO()
+        with mock.patch.object(di, "_remote", remote), redirect_stderr(err):
+            di.publish_state(local, {"journal": "Travel", "target": "live"})
+        self.assertNotIn("put", calls)
+        self.assertIn("could not check", err.getvalue())
 
     def test_legacy_ledger_survives_a_timezone_change(self):
         # Imported in one zone, verified in another: still the same write.

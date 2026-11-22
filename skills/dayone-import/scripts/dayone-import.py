@@ -15,7 +15,7 @@ hours -- sometimes a whole day -- off. Day One's SQLite store still has the
 original zone per entry, so this reads that directly and uses the export
 folder only as a source of image bytes.
 """
-import os, re, sys, json, time, shutil, zoneinfo, sqlite3, hashlib, argparse, collections, subprocess, datetime
+import os, re, sys, json, time, shutil, calendar, zoneinfo, sqlite3, hashlib, argparse, collections, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dayone, exifgps, photoslib
@@ -69,6 +69,24 @@ def _remote(args, *extra, **kw):
     return r.stdout if r.returncode == 0 else None
 
 
+def _remote_status(key):
+    """"present" or "absent" for a plugin-data key, or None when it can't say.
+
+    `get` exits 1 both for a missing key and for a failed request, so it
+    cannot tell "nothing there" from "couldn't check". `list` can: it
+    succeeds with the keys that exist, or fails.
+    """
+    plugin, _, rel = key.partition("/")
+    body = _remote(["list", plugin, os.path.dirname(rel)])
+    if body is None:
+        return None
+    try:
+        keys = {k.get("key") for k in json.loads(body).get("keys", [])}
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return "present" if rel in keys else "absent"
+
+
 def pull_state(path, ident=None):
     """Seed the local cache from the worker when this machine has no copy.
 
@@ -110,7 +128,16 @@ def publish_state(path, ident=None):
     if not os.path.exists(path):
         return
     key = _remote_key(path, ident)
-    body = _remote(["get", key])
+    # Only an explicit "absent" lets a put go ahead unchecked; a failed lookup
+    # could be hiding another import's ledger at this key.
+    status = _remote_status(key)
+    body = _remote(["get", key]) if status == "present" else None
+    if status is None or (status == "present" and body is None):
+        sys.stderr.write(
+            "warning: could not check plugin-data key %s, so not publishing over "
+            "it. The local copy at %s is the only one; it publishes next run.\n"
+            % (key, path))
+        return
     if body and ident:
         try:
             meta = json.loads(body).get("meta")
@@ -146,6 +173,29 @@ def _target_id(target_db):
         return "live"
     real = os.path.realpath(os.path.expanduser(db))
     return "live" if real == os.path.realpath(REAL_STORE) else real
+
+
+def _store_id(target_db):
+    """The destination store's Core Data UUID (Z_METADATA.Z_UUID), or None.
+
+    Paths do not identify a store: two Macs with the same username have the
+    same live path but different stores, and a ledger's primary keys are only
+    meaningful in the store that allocated them.
+    """
+    db = target_db or os.environ.get("JOURNAL_DB") or REAL_STORE
+    db = os.path.abspath(os.path.expanduser(db))
+    if not os.path.exists(db):
+        return None
+    try:
+        from urllib.parse import quote
+        c = sqlite3.connect("file:%s?mode=ro" % quote(db), uri=True, timeout=5)
+        try:
+            row = c.execute("select Z_UUID from Z_METADATA limit 1").fetchone()
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row and row[0] else None
 
 
 def is_live(target_db):
@@ -184,6 +234,7 @@ def load_state(path, journal_name, target_db=None, source_db=None):
     """
     target = _target_id(target_db)
     source = _source_id(source_db)
+    store = _store_id(target_db)
     if target == "live":
         pull_state(path, {"journal": journal_name, "target": target, "source": source})
     if os.path.exists(path):
@@ -208,10 +259,36 @@ def load_state(path, journal_name, target_db=None, source_db=None):
                 "--state to choose another." % (path, meta["source"], source))
         if meta.get("source") is None or meta.get("target") is None:
             state["_retag"] = True           # tagged by an older version: save the full tag
+        if store and meta.get("store") and meta["store"] != store:
+            # Written against another Journal store (restored on another Mac):
+            # its primary keys belong there. verify_legacy remaps them by the
+            # entries' own UUIDs, or refuses.
+            state["_moved"] = meta["store"]
+        elif store and not meta.get("store") and state["done"]:
+            # Tagged before ledgers recorded their store: nothing proves these
+            # ids are this store's, so verify them once, as for an untagged one.
+            state["_legacy"] = True
     elif state["done"]:
         state["_legacy"] = True
+    state.setdefault("dest", {})
     state["meta"] = {"journal": journal_name, "target": target, "source": source}
+    if store:
+        state["meta"]["store"] = store
     return state
+
+
+def _record_dest(state, rows):
+    """Remember each mapping's Journal entry UUID beside its primary key.
+
+    The UUID is the entry's identity everywhere the entry syncs; the primary
+    key is only this store's. With it a ledger restored on another Mac can be
+    resolved to that Mac's rows instead of trusted or thrown away.
+    """
+    by_id = {r["id"]: r for r in rows}
+    for uuid, pk in state["done"].items():
+        r = by_id.get(pk) if type(pk) is int else None
+        if r is not None and r.get("uuid") and uuid not in state["dest"]:
+            state["dest"][uuid] = r["uuid"]
 
 
 def verify_legacy(args, state, state_path, entries):
@@ -223,6 +300,10 @@ def verify_legacy(args, state, state_path, entries):
     import skips anything or a repair edits the wrong entry.
     """
     retag = state.pop("_retag", False)
+    moved = state.pop("_moved", None)
+    if moved:
+        _remap_moved(args, state, state_path, moved)
+        return
     if not state.pop("_legacy", False):
         if retag and not getattr(args, "dry_run", False):
             save_state(state_path, state)    # add the fields older tags lack
@@ -285,8 +366,47 @@ def verify_legacy(args, state, state_path, entries):
             del state["done"][uuid]
             print("ledger: could not confirm Day One %s in %s; it will be imported"
                   % (uuid, _target_id(args.target_db)))
+    _record_dest(state, listed)
     if not getattr(args, "dry_run", False):
         save_state(state_path, state)        # now tagged: verified once
+
+
+def _remap_moved(args, state, state_path, other_store):
+    """Resolve a ledger from another Journal store to this store's rows.
+
+    Each mapping is looked up by the Journal entry UUID it recorded, which
+    the entry keeps wherever it syncs. A mapping without one, or whose entry
+    is not in this store, cannot be trusted: its primary key names some other
+    row here, so the ledger is refused rather than skip entries or repair the
+    wrong ones.
+    """
+    listed = _destination_rows(args.cli, args.target_db)
+    by_juuid = {r["uuid"]: r for r in listed if r.get("uuid")}
+    bad = []
+    for uuid, pk in list(state["done"].items()):
+        if type(pk) is not int:
+            continue
+        r = by_juuid.get(state["dest"].get(uuid))
+        if r is None:
+            bad.append(uuid)
+        else:
+            state["done"][uuid] = r["id"]
+    idless = [u for u, pk in state["done"].items() if type(pk) is not int]
+    if bad or idless:
+        die("ledger %s was written against another Journal store (%s; restored "
+            "from another Mac?), and %d of its entries cannot be found here by "
+            "their entry UUID (e.g. Day One %s). Its entry ids belong to that "
+            "store. Move it aside to import from scratch, or run on the Mac "
+            "that wrote it." % (state_path, other_store, len(bad) + len(idless),
+                                (bad or idless)[0]))
+    # A pending write from the other store's run carries that store's id
+    # floor, which says nothing about ids here: the entry may have synced in
+    # below it. Keep its instant and rendered words as its identity, drop the
+    # floor, and let reconcile_pending settle it against this store's rows.
+    for info in state["pending"].values():
+        info["floor_pk"] = 0
+    if not getattr(args, "dry_run", False):
+        save_state(state_path, state)        # now this store's ids and tag
 
 
 _ZONE_CACHE = {}
@@ -388,7 +508,7 @@ def gather(args):
         extra = ([os.path.join(args.export, d)
                   for d in ("photos", "videos", "audios", "pdfs")]
                  if args.export else [])
-        media = dayone.media_index(extra)
+        media = dayone.media_index(extra, args.db)
         entries = dayone.read_entries(con, j["pk"], media)
     return j, entries
 
@@ -456,6 +576,39 @@ def cmd_plan(args):
         print("\nmanifest -> %s" % args.json)
 
 
+def _local_zone_name():
+    local = os.environ.get("TZ")
+    if not local:
+        try:
+            local = os.path.realpath("/etc/localtime").split("zoneinfo/", 1)[1]
+        except IndexError:
+            local = None
+    return local
+
+
+def _wall_epochs(stamp):
+    """Every instant a local wall clock can name: two in a daylight-saving fold.
+
+    journal-cli resolves a repeated hour one way and this process might
+    resolve it the other, so a pending write records both.
+    """
+    try:
+        naive = datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+        z = zoneinfo.ZoneInfo(_local_zone_name())
+    except (TypeError, ValueError, zoneinfo.ZoneInfoNotFoundError, OSError):
+        e = _wall_epoch(stamp)
+        return [e] if e is not None else []
+    return sorted({int(naive.replace(tzinfo=z, fold=f).timestamp()) for f in (0, 1)})
+
+
+def _utc_epoch(stamp):
+    """A "YYYY-MM-DD HH:MM:SS" reading in UTC -> unix seconds."""
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _wall_epoch(stamp):
     """A "YYYY-MM-DD HH:MM:SS" wall clock in this Mac's zone -> unix seconds.
 
@@ -486,14 +639,20 @@ def _expected_fingerprint(cli, title_md, body_md):
 
 
 def _destination_rows(cli, target_db):
-    """[{id, epoch, fp}] for every entry in the destination store."""
+    """[{id, uuid, epoch, fp, ...}] for every entry in the destination store.
+
+    Listed in UTC and read as UTC: a local listing repeats an hour at the end
+    of daylight saving, and two instants that print the same cannot both be
+    recovered from the text.
+    """
     cmd = [cli] + (["--db", target_db] if target_db else []) + [
         "list", "--limit", "1000000", "--include-empty", "--full", "--json"]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       env=dict(os.environ, TZ="UTC"))
     if r.returncode:
         die("could not list destination entries to reconcile the ledger: %s"
             % (r.stderr or r.stdout).strip())
-    return [{"id": x["id"], "epoch": _wall_epoch(x.get("date")),
+    return [{"id": x["id"], "uuid": x.get("uuid"), "epoch": _utc_epoch(x.get("date")),
              "fp": _fingerprint(x.get("title"), x.get("text")),
              "title": x.get("title") or "", "text": x.get("text") or ""}
             for x in json.loads(r.stdout)]
@@ -551,13 +710,15 @@ def _landed(info, rows, claimed):
     with the same rendered title and text counts. Date alone is not identity.
     """
     floor = info.get("floor_pk", 0)
-    epoch = info.get("epoch")
-    if epoch is None:
-        epoch = _wall_epoch(info.get("date"))
+    epochs = set(info.get("epochs") or [])
+    if info.get("epoch") is not None:
+        epochs.add(info["epoch"])
+    if not epochs:
+        epochs = set(_wall_epochs(info.get("date")))
     fp = info.get("fp")
     return [r for r in rows
             if r["id"] > floor and r["id"] not in claimed
-            and r["epoch"] is not None and r["epoch"] == epoch
+            and r["epoch"] is not None and r["epoch"] in epochs
             and (fp is None or r["fp"] == fp)]
 
 
@@ -616,6 +777,8 @@ def cmd_import(args):
             die("cannot write the import ledger %s: %s" % (state_path, e))
         rows = _destination_rows(args.cli, args.target_db)
         reconcile_pending(args, state, state_path, rows)
+        _record_dest(state, rows)
+        save_state(state_path, state)       # keep them even if nothing is left to write
         # Anything this run creates gets an id above this.
         floor_pk = max([r["id"] for r in rows] or [0])
 
@@ -694,7 +857,8 @@ def cmd_import(args):
             # dies in between, the next run reconciles instead of guessing.
             # The record carries what identifies the entry once it lands.
             state["pending"][e["uuid"]] = {
-                "date": when, "epoch": _wall_epoch(when), "floor_pk": floor_pk,
+                "date": when, "epoch": _wall_epoch(when),
+                "epochs": _wall_epochs(when), "floor_pk": floor_pk,
                 "fp": _expected_fingerprint(args.cli, title_md, body_md)}
             save_state(state_path, state)
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -733,6 +897,10 @@ def cmd_import(args):
             _prune_backups(backups_before)
 
     if not args.dry_run:
+        if ok:
+            # One listing to record the new entries' UUIDs, so this ledger
+            # can be resolved on another Mac (see _record_dest).
+            _record_dest(state, _destination_rows(args.cli, args.target_db))
         save_state(state_path, state)
         if live:                        # rehearsal ledgers stay on this Mac
             publish_state(state_path, state.get("meta"))

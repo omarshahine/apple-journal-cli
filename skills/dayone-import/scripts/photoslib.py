@@ -58,8 +58,13 @@ def parse_place(blob):
     if not blob:
         return {}
     try:
-        objs = plistlib.loads(blob)["$objects"]
+        archive = plistlib.loads(blob)
     except Exception:
+        return {}
+    # A decodable archive can still be the wrong shape; treat it as no place
+    # rather than let a TypeError abort the whole match.
+    objs = archive.get("$objects") if isinstance(archive, dict) else None
+    if not isinstance(objs, list):
         return {}
     out = {}
     for o in objs:
@@ -78,11 +83,20 @@ def parse_place(blob):
         if isinstance(o, dict) and "placeType" in o and "name" in o:
             v = _deref(objs, o.get("name"))
             if isinstance(v, str) and v.strip():
-                names.append((o.get("placeType"), v, o.get("area") or 0))
+                names.append((o.get("placeType"), v, _area(o.get("area"))))
     if names:
-        smallest = min(names, key=lambda x: (x[2] if x[2] else float("inf")))
+        smallest = min(names, key=lambda x: x[2])
         out["place"] = smallest[1]
     return out
+
+
+def _area(v):
+    """A place's area as a finite positive number, else infinity (unknown
+    sorts last, so it never wins "most specific")."""
+    import math
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return float("inf")
+    return float(v) if math.isfinite(v) and v > 0 else float("inf")
 
 
 def _lon_window(lon, dlon):
@@ -120,7 +134,11 @@ def match(con, wall, lat, lon, seconds=120, meters=300):
         return None             # e.g. a camera's "0000:00:00 00:00:00"
     target = dt.replace(tzinfo=datetime.timezone.utc).timestamp() - CD_EPOCH
     dlat = meters / 111_000.0
-    dlon = meters / (111_000.0 * max(0.05, math.cos(math.radians(lat))))
+    # Size the longitude window for the most poleward latitude it covers, so
+    # it never comes up short; a window that reaches a pole takes every
+    # longitude (they all meet there).
+    edge = abs(lat) + dlat
+    dlon = 360.0 if edge >= 90 else meters / (111_000.0 * math.cos(math.radians(edge)))
     lon_sql, lon_args = _lon_window(lon, dlon)
     row = con.execute("""
         select z.ZUUID, z.ZLATITUDE, z.ZLONGITUDE,

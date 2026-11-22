@@ -560,6 +560,13 @@ if [ $? -eq 0 ]; then
   "$CLI" edit --remove-media $BAID --db "$DB" $BPK2 >/dev/null 2>&1
   ok "--db ends a list option's values" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$BPK2;")" "0"
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
+  # Fourth review pass: escapes are scalars (an escaped "*" followed by a
+  # combining accent stays a literal "*"), image syntax is hidden from the
+  # emphasis passes, and tilde fences are fences.
+  ok "escape before a combining mark"  "$(printf '\\*\xcc\x81literal*' | "$CLI" render --inline)" "$(printf '*\xcc\x81literal*')"
+  ok "image url keeps underscores"     "$("$CLI" render --body '![photo](https://example.com/_full_/image.jpg)' --inline)" '![photo](https://example.com/_full_/image.jpg)'
+  ok "image url with parentheses"      "$("$CLI" render --body '![photo](https://example.com/a(b)/_full_/image.jpg)' --inline)" '![photo](https://example.com/a(b)/_full_/image.jpg)'
+  ok "tilde fence keeps its content"   "$(printf '~~~\n**x**\n```\n~~~\nafter' | "$CLI" render --plain)" "$(printf '**x**\n```\nafter')"
   # --- third review pass (Markdown): nested emphasis and private-use text ---
   ok "nested bold stays bold"          "$("$CLI" render --body '**outer __inner__ outer**' | grep -c 'b0')" "0"
   PUAFILE="$SB/pua.md"
