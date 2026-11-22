@@ -662,15 +662,24 @@ func cmdSandbox(_ a: Args) {
     do { try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true) }
     catch { die("cannot create \(dir): \(error.localizedDescription)") }
     let base = "moments.sqlite"
-    for suf in ["", "-wal", "-shm"] {
-        try? FileManager.default.removeItem(atPath: dir + "/" + base + suf)
-    }
-    if let err = sqliteBackup(from: src, to: dir + "/" + base) {
+    let dst = dir + "/" + base
+    func real(_ p: String) -> String { URL(fileURLWithPath: p).resolvingSymlinksInPath().standardizedFileURL.path }
+    if real(src) == real(dst) { die("sandbox --from and --dir name the same store: \(src)") }
+    // Copy beside the destination and swap it in only once the copy is good,
+    // so a failed copy never costs the store that was already there.
+    let tmp = dst + ".journal-cli-" + uid()
+    if let err = sqliteBackup(from: src, to: tmp) {
+        try? FileManager.default.removeItem(atPath: tmp)
         if !FileManager.default.isReadableFile(atPath: src) {
             die("permission denied reading \(src)\n"
                 + "  Grant Full Disk Access, or seed from a backup with --from.")
         }
         die("could not copy \(src): \(err)")
+    }
+    for suf in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: dst + suf) }
+    guard rename(tmp, dst) == 0 else {
+        try? FileManager.default.removeItem(atPath: tmp)
+        die("could not move the copy into \(dst): \(String(cString: strerror(errno)))")
     }
     try? FileManager.default.createDirectory(atPath: dir + "/Attachments",
                                              withIntermediateDirectories: true)

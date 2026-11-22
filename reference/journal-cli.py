@@ -232,13 +232,25 @@ class Live:
     def __exit__(self, exc_type, *rest):
         global LIVE_FILES
         LIVE_FILES = None
-        if exc_type:
-            self.conn.rollback(); self.conn.close()
-            for p in reversed(self.files["created"]):
-                shutil.rmtree(p, ignore_errors=True)
-            return
-        self.conn.commit(); self.conn.close()
-        apply_removals(self.files, self.backup)
+        try:
+            if not exc_type:
+                self.conn.commit()        # a failed commit lands in the except below
+                committed = True
+            else:
+                committed = False
+        except BaseException:
+            committed = False
+            raise
+        finally:
+            if not committed:
+                try: self.conn.rollback()
+                except sqlite3.Error: pass
+            self.conn.close()
+            if not committed:
+                for p in reversed(self.files["created"]):
+                    shutil.rmtree(p, ignore_errors=True)
+        if committed:                     # only a committed write removes files
+            apply_removals(self.files, self.backup)
 
 
 # ---------------------------------------------------------------- RTF
@@ -796,12 +808,13 @@ def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index,
     entry_dir = os.path.join(attach_dir(), entry_uuid)
     abs_dir = os.path.join(attach_dir(), rel_dir)
     new_entry, new_asset = not os.path.exists(entry_dir), not os.path.exists(abs_dir)
+    # Staged before creating, so a failure part way through still cleans up.
+    if new_entry: stage_created(entry_dir)
+    elif new_asset: stage_created(abs_dir)
     try:
         os.makedirs(abs_dir, exist_ok=True)
     except OSError as e:
         die(f"cannot create attachment folder {abs_dir}: {e.strerror}")
-    if new_entry: stage_created(entry_dir)
-    elif new_asset: stage_created(abs_dir)
     fname = f"{uid()}{ext}" if plain_name else f"{uid()}_resized{ext}"
     dst = os.path.join(abs_dir, fname)
     try:
@@ -1365,16 +1378,23 @@ def cmd_sandbox(a):
         die(f"source store not found: {src}")
     os.makedirs(a.dir, exist_ok=True)
     base = "moments.sqlite"
-    for suf in ("", "-wal", "-shm"):
-        if os.path.exists(os.path.join(a.dir, base + suf)):
-            os.remove(os.path.join(a.dir, base + suf))
+    dst = os.path.join(a.dir, base)
+    if os.path.realpath(src) == os.path.realpath(dst):
+        die(f"sandbox --from and --dir name the same store: {src}")
+    # Copy beside the destination and swap it in only once the copy is good,
+    # so a failed copy never costs the store that was already there.
+    tmp = f"{dst}.journal-cli-{uid()}"
     try:
-        sqlite_backup(src, os.path.join(a.dir, base))
+        sqlite_backup(src, tmp)
     except sqlite3.Error as e:
+        if os.path.exists(tmp): os.remove(tmp)
         if not os.access(src, os.R_OK):
             die(f"permission denied reading {src}\n"
                 "  Grant Full Disk Access, or seed from a backup with --from.")
         die(f"could not copy {src}: {e}")
+    for suf in ("-wal", "-shm"):
+        if os.path.exists(dst + suf): os.remove(dst + suf)
+    os.replace(tmp, dst)
     os.makedirs(os.path.join(a.dir, "Attachments"), exist_ok=True)
     print(os.path.join(a.dir, base))
 

@@ -635,6 +635,12 @@ ok "hard delete keeps media in the backup" "$(find "$BK3" -path "*/Attachments/$
 SB2=$(mktemp -d /tmp/journal-sandbox2.XXXXXX)
 DB2=$("$CLI" sandbox --dir "$SB2" --from "$DB")
 ok "sandbox copy is a valid store" "$(sqlite3 "$DB2" 'PRAGMA integrity_check;')" "ok"
+N2A=$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")
+"$CLI" sandbox --dir "$SB2" --from "$DB2" >/dev/null 2>&1
+ok "sandbox onto its own source refused" "$?" "1"
+ok "sandbox onto its own source keeps it" "$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")" "$N2A"
+"$CLI" sandbox --dir "$SB2" --from "$SB2/no-such.sqlite" >/dev/null 2>&1
+ok "failed sandbox copy keeps the old store" "$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")" "$N2A"
 trash "$SB2/Attachments" 2>/dev/null || mv "$SB2/Attachments" "$SB2/Attachments.old"
 : > "$SB2/Attachments"
 N2=$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")

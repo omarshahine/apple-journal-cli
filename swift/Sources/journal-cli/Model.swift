@@ -270,9 +270,10 @@ func addFile(_ db: DB, assetPK: Int64, assetUUID: String, entryUUID: String,
     // Note what this write creates, so an abort can take it back out.
     let newEntryDir = !fm.fileExists(atPath: entryDir)
     let newAssetDir = !fm.fileExists(atPath: absDir)
+    // Staged before creating, so a failure part way through still cleans up.
+    if newEntryDir { stageCreated(entryDir) } else if newAssetDir { stageCreated(absDir) }
     do { try fm.createDirectory(atPath: absDir, withIntermediateDirectories: true) }
     catch { die("cannot create attachment folder \(absDir): \(error.localizedDescription)") }
-    if newEntryDir { stageCreated(entryDir) } else if newAssetDir { stageCreated(absDir) }
     let fname = plainName ? "\(uid()).\(e)" : "\(uid())_resized.\(e)"
     let dst = absDir + "/" + fname
     do {
