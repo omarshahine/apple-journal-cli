@@ -24,7 +24,16 @@ private func readBodyRTF(_ a: Args) -> (data: Data, plain: String)? {
 private func readBody(_ a: Args) -> String? {
     if let b = a.value("--body") { return b }
     if let f = a.value("--body-file") {
-        return (try? String(contentsOfFile: f, encoding: .utf8)) ?? ""
+        // A read failure must not look like an empty body: `edit` would take
+        // that as "clear the text". An empty file still clears it on purpose.
+        let path = (f as NSString).expandingTildeInPath
+        guard let d = FileManager.default.contents(atPath: path) else {
+            die("cannot read --body-file: \(f)")
+        }
+        guard let text = String(data: d, encoding: .utf8) else {
+            die("--body-file is not valid UTF-8: \(f)")
+        }
+        return text
     }
     // stdin only when it is a pipe or redirected file; a tty or /dev/null would block
     var st = stat()
@@ -34,7 +43,8 @@ private func readBody(_ a: Args) -> String? {
             let d = FileHandle.standardInput.readDataToEndOfFile()
             // an empty pipe/file (CI runners, `< /dev/null`-less shells) is no input
             if d.isEmpty { return nil }
-            return String(data: d, encoding: .utf8)
+            guard let text = String(data: d, encoding: .utf8) else { die("stdin is not valid UTF-8") }
+            return text
         }
     }
     return nil
@@ -471,9 +481,7 @@ func cmdDelete(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
-            if let eu = uString(row.b("ZID")) {
-                try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
-            }
+            if let eu = uString(row.b("ZID")) { scheduleRemoval(attachDir() + "/" + eu) }
             return "hard-deleted (with \(apks.count) assets)"
         } else {
             db.exec("""
@@ -534,9 +542,7 @@ func cmdEmpty(_ a: Args) {
             db.exec("delete from ZJOURNALENTRYASSETMO where ZENTRY=?", [pk])
             db.exec("delete from Z_5JOURNALS where Z_5ENTRIES=?", [pk])
             db.exec("delete from ZJOURNALENTRYMO where Z_PK=?", [pk])
-            if let eu = uString(r.b("ZID")) {
-                try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu)
-            }
+            if let eu = uString(r.b("ZID")) { scheduleRemoval(attachDir() + "/" + eu) }
             purged += 1
         }
     }
@@ -653,15 +659,18 @@ func cmdSandbox(_ a: Args) {
     guard let dir = a.value("--dir") else { die("sandbox needs --dir") }
     let src = a.value("--from").map { ($0 as NSString).expandingTildeInPath } ?? DEFAULT_DB
     guard FileManager.default.fileExists(atPath: src) else { die("source store not found: \(src)") }
-    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    do { try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true) }
+    catch { die("cannot create \(dir): \(error.localizedDescription)") }
     let base = "moments.sqlite"
-    for suf in ["", "-wal", "-shm"] where FileManager.default.fileExists(atPath: src + suf) {
+    for suf in ["", "-wal", "-shm"] {
         try? FileManager.default.removeItem(atPath: dir + "/" + base + suf)
-        do { try FileManager.default.copyItem(atPath: src + suf, toPath: dir + "/" + base + suf) }
-        catch {
+    }
+    if let err = sqliteBackup(from: src, to: dir + "/" + base) {
+        if !FileManager.default.isReadableFile(atPath: src) {
             die("permission denied reading \(src)\n"
                 + "  Grant Full Disk Access, or seed from a backup with --from.")
         }
+        die("could not copy \(src): \(err)")
     }
     try? FileManager.default.createDirectory(atPath: dir + "/Attachments",
                                              withIntermediateDirectories: true)

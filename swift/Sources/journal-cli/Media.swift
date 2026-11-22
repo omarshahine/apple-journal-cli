@@ -21,8 +21,9 @@ func imageDims(_ path: String) -> (Int, Int) {
 }
 
 /// Copy src to dst, downscaling to RESIZE_MAX long edge like Journal does.
+/// Returns whether it resized; throws when even the plain copy fails.
 @discardableResult
-func resizeInto(_ src: String, _ dst: String) -> Bool {
+func resizeInto(_ src: String, _ dst: String) throws -> Bool {
     let (w, h) = imageDims(src)
     if max(w, h) > RESIZE_MAX,
        let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: src) as CFURL, nil),
@@ -40,7 +41,7 @@ func resizeInto(_ src: String, _ dst: String) -> Bool {
         }
     }
     try? FileManager.default.removeItem(atPath: dst)
-    try? FileManager.default.copyItem(atPath: src, toPath: dst)
+    try FileManager.default.copyItem(atPath: src, toPath: dst)
     return false
 }
 

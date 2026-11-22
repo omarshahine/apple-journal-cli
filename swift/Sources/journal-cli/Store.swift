@@ -1,39 +1,124 @@
 // Store.swift — snapshot reads, guarded live writes, backups, RTF, metadata.
 import Foundation
 import AppKit
+import SQLite3
 
 // ---------------------------------------------------------------- snapshot / live
 
-/// Read-only access: copy db + -wal + -shm aside so the live store is never touched.
+/// Copy a SQLite store into one consistent file with SQLite's online backup
+/// API. Copying the database, -wal and -shm one after another could mix
+/// generations if Journal checkpointed in between; the backup API reads every
+/// page inside a single read transaction instead. The source is opened
+/// read-only; a WAL reader never blocks Journal's own writes.
+/// Returns nil on success, else a description of the failure.
+func sqliteBackup(from src: String, to dst: String) -> String? {
+    var s: OpaquePointer?, d: OpaquePointer?
+    defer { sqlite3_close(s); sqlite3_close(d) }
+    guard sqlite3_open_v2(src, &s, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        return "cannot open \(src): " + (s.map { String(cString: sqlite3_errmsg($0)) } ?? "?")
+    }
+    sqlite3_busy_timeout(s, 5000)
+    guard sqlite3_open_v2(dst, &d, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK else {
+        return "cannot create \(dst): " + (d.map { String(cString: sqlite3_errmsg($0)) } ?? "?")
+    }
+    guard let b = sqlite3_backup_init(d, "main", s, "main") else {
+        return String(cString: sqlite3_errmsg(d))
+    }
+    var rc: Int32 = SQLITE_OK
+    var busy = 0
+    while true {
+        rc = sqlite3_backup_step(b, -1)
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && busy < 50 {
+            busy += 1; sqlite3_sleep(100); continue
+        }
+        if rc != SQLITE_OK { break }
+    }
+    sqlite3_backup_finish(b)
+    return rc == SQLITE_DONE ? nil : String(cString: sqlite3_errstr(rc))
+}
+
+/// Read-only access: a consistent copy of the store, so the live one is never written.
 func withSnapshot<T>(_ body: (DB) -> T) -> T {
     let fm = FileManager.default
     guard fm.fileExists(atPath: DB_PATH) else { die("store not found at \(DB_PATH)") }
     let tmp = NSTemporaryDirectory() + "journal-cli." + uid()
-    try? fm.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+    do { try fm.createDirectory(atPath: tmp, withIntermediateDirectories: true) }
+    catch { die("cannot create a temp folder for the snapshot: \(error.localizedDescription)") }
     defer { try? fm.removeItem(atPath: tmp) }
-    let base = URL(fileURLWithPath: DB_PATH).lastPathComponent
-    for suf in ["", "-wal", "-shm"] {
-        let src = DB_PATH + suf
-        if fm.fileExists(atPath: src) {
-            do { try fm.copyItem(atPath: src, toPath: tmp + "/" + base + suf) }
-            catch {
-                die("permission denied. Grant Full Disk Access to this terminal, then relaunch it.")
-            }
+    let copy = tmp + "/" + URL(fileURLWithPath: DB_PATH).lastPathComponent
+    if let err = sqliteBackup(from: DB_PATH, to: copy) {
+        if !fm.isReadableFile(atPath: DB_PATH) {
+            die("permission denied. Grant Full Disk Access to this terminal, then relaunch it.")
         }
+        die("could not snapshot the store: \(err)")
     }
-    return body(DB(path: tmp + "/" + base))
+    return body(DB(path: copy))
 }
 
+/// Back up the store before a live write. Fails closed: if anything goes
+/// wrong the write is refused, never run without its backup. Every call gets
+/// its own folder, so two writes in the same second keep two recovery points.
 func takeBackup(reason: String = "write") -> String {
     let fm = FileManager.default
+    let root = BACKUPS_DIR
+    do { try fm.createDirectory(atPath: root, withIntermediateDirectories: true) }
+    catch { die("backup failed: cannot create \(root): \(error.localizedDescription)\n  Nothing was written.") }
     let f = DateFormatter(); f.dateFormat = "yyyyMMdd-HHmmss"
-    let dir = BACKUPS_DIR + "/" + f.string(from: Date()) + "-" + reason
-    try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    let base = URL(fileURLWithPath: DB_PATH).lastPathComponent
-    for suf in ["", "-wal", "-shm"] where fm.fileExists(atPath: DB_PATH + suf) {
-        try? fm.copyItem(atPath: DB_PATH + suf, toPath: dir + "/" + base + suf)
+    let stem = root + "/" + f.string(from: Date()) + "-" + reason
+    var dir = stem
+    var n = 1
+    while mkdir(dir, 0o755) != 0 {
+        guard errno == EEXIST, n < 1000 else {
+            die("backup failed: cannot create \(dir): \(String(cString: strerror(errno)))\n  Nothing was written.")
+        }
+        n += 1; dir = stem + "-\(n)"
+    }
+    let dst = dir + "/" + URL(fileURLWithPath: DB_PATH).lastPathComponent
+    if let err = sqliteBackup(from: DB_PATH, to: dst) {
+        die("backup failed: \(err)\n  Nothing was written.")
     }
     return dir
+}
+
+/// Filesystem side effects of the open live write. Removals wait until the
+/// database transaction commits, so a write that dies part way never leaves
+/// rows pointing at deleted files; and they move into the write's backup when
+/// it has one, so restoring that backup brings the removed media back.
+final class LiveFiles {
+    var created: [String] = []
+    var removals: [String] = []
+}
+var LIVE_FILES: LiveFiles?
+
+/// An attachment folder this write made; removed again if the write aborts.
+func stageCreated(_ path: String) { LIVE_FILES?.created.append(path) }
+
+/// Remove an attachment folder once the write commits.
+func scheduleRemoval(_ path: String) {
+    if let l = LIVE_FILES { l.removals.append(path) }
+    else { try? FileManager.default.removeItem(atPath: path) }
+}
+
+private func applyRemovals(_ files: LiveFiles, backup: String?) {
+    let fm = FileManager.default
+    let root = attachDir()
+    for path in files.removals where fm.fileExists(atPath: path) {
+        guard let backup = backup else { try? fm.removeItem(atPath: path); continue }
+        let rel = path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1))
+                                            : URL(fileURLWithPath: path).lastPathComponent
+        let dest = backup + "/Attachments/" + rel
+        do {
+            try fm.createDirectory(atPath: (dest as NSString).deletingLastPathComponent,
+                                   withIntermediateDirectories: true)
+            try fm.moveItem(atPath: path, toPath: dest)
+        } catch {
+            // The database change is committed; leaving the files in place
+            // loses nothing, it only leaves them unreferenced.
+            FileHandle.standardError.write(
+                "journal-cli: warning: kept \(path) (could not move it into the backup: \(error.localizedDescription))\n"
+                    .data(using: .utf8)!)
+        }
+    }
 }
 
 let RISK_MARKER = NSHomeDirectory() + "/.config/journal-cli/risk-accepted"
@@ -92,12 +177,24 @@ func withLive<T>(allowLiveDefault: Bool, acceptRisk: Bool = false, _ body: (DB) 
         }
         ensureRiskAccepted(acceptFlag: acceptRisk)
         if journalRunning() { die("Journal.app is running. Quit it first, then retry.") }
-        FileHandle.standardError.write("backup: \(takeBackup())\n".data(using: .utf8)!)
+    }
+    var backup: String?
+    if isDefault || BACKUP_OVERRIDE != nil {
+        backup = takeBackup()
+        FileHandle.standardError.write("backup: \(backup!)\n".data(using: .utf8)!)
+    }
+    let files = LiveFiles()
+    LIVE_FILES = files
+    DIE_CLEANUP = {
+        for p in files.created.reversed() { try? FileManager.default.removeItem(atPath: p) }
     }
     let db = DB(path: DB_PATH)
     db.exec("BEGIN")
     let out = body(db)
     db.exec("COMMIT")
+    DIE_CLEANUP = nil
+    LIVE_FILES = nil
+    applyRemovals(files, backup: backup)
     return out
 }
 

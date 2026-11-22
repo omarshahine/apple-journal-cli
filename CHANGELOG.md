@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: data safety for live writes and reads
+
+Found by a full Clawpatch review of the CLI. Every fix lands in both the
+Swift build and the Python reference, with regression tests.
+
+- **An unreadable `--body-file` no longer erases an entry's text.** A missing
+  file, a permission error or invalid UTF-8 used to become an empty body, and
+  `edit` took that as "clear the text". Now it is an error and nothing is
+  written. An empty file still clears the text on purpose. The same goes for
+  non-UTF-8 stdin.
+- **Backups fail closed.** If the backup folder can't be created or the copy
+  fails, the write is refused. Each write gets its own folder, so two writes
+  in the same second no longer share (and lose) a recovery point.
+- **Removed media is recoverable.** `edit --remove-media`, `delete --hard` and
+  `empty` used to delete attachment files outright, so the automatic backup
+  could not bring them back. They now move into that write's backup under
+  `Attachments/`, after the database commit.
+- **Failed writes don't strand or lose files.** File removals wait for the
+  commit, so an edit that fails part way (say, an unknown journal) no longer
+  deletes media whose rows roll back. A failed attachment copy (full disk, an
+  unwritable folder) refuses the write instead of committing rows that point at
+  missing files, and any attachment folders the write created are removed.
+- **Snapshots and backups are consistent.** Reads, backups and `sandbox` used
+  to copy `moments.sqlite`, `-wal` and `-shm` one after another, which could mix
+  generations if Journal checkpointed in between. They now use SQLite's online
+  backup API, which copies inside one read transaction.
+
 ## 1.4.2
 
 ### Added: `--version`

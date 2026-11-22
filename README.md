@@ -56,7 +56,10 @@ Release history and upgrade notes: [CHANGELOG.md](CHANGELOG.md).
 ## Reading
 
 Reads run against a temp snapshot of the store, so they are safe while
-Journal.app is open and never lock the live database.
+Journal.app is open. The snapshot comes from SQLite's online backup API, which
+reads the live database read-only in one transaction: it never writes the
+store or blocks Journal's own writes, and a checkpoint mid-copy cannot leave it
+half old, half new.
 
 ```sh
 journal-cli list --limit 20 --full            # --full prints bodies
@@ -82,7 +85,7 @@ text from drawings.
 
 Writes against the real store require `--live`, refuse to run while
 Journal.app is open, take a timestamped backup to `~/Backups/journal-cli/`
-first, and require a **one-time risk acknowledgment** (interactive prompt, or
+first (if the backup fails, nothing is written), and require a **one-time risk acknowledgment** (interactive prompt, or
 `--accept-risk` for scripts — agents should ask their user before passing it).
 Every mutating command also takes `--dry-run`, which prints the plan and
 writes nothing. New entries sync to iCloud like native ones — verified end to end,
@@ -210,12 +213,14 @@ humans:
 
 | Layer | Behavior |
 |---|---|
-| Reads | temp snapshot of `db`+`-wal`+`-shm`; live store never opened for read |
+| Reads | temp snapshot via SQLite's online backup API (read-only, one transaction); the live store is never written |
 | Risk acknowledgment | first live write requires typing "I understand" (or `--accept-risk`); stored in `~/.config/journal-cli/` |
 | `--dry-run` | every mutating command can print its plan and write nothing |
 | `--live` gate | writes to the real store refuse to run without it |
 | App check | writes refuse to run while Journal.app is open |
-| Auto-backup | every live write snapshots the store to `~/Backups/journal-cli/` first |
+| Auto-backup | every live write backs the store up to its own folder in `~/Backups/journal-cli/` first, and is refused if that fails. Media that `edit --remove-media`, `delete --hard` or `empty` removes is moved into that backup's `Attachments/` after the write commits, so restoring the backup restores the files too |
+| Body input | an unreadable or non-UTF-8 `--body-file` (or stdin) is an error, never an empty body; an empty file still clears the text on purpose |
+| Failed writes | a write that fails part way rolls back and removes any attachment folders it created; files it was going to remove stay until the commit |
 | Synced hard-deletes | refused without `--force`: a local row delete does not tombstone the CloudKit record, and the entry **resurrects on the next sync** (observed). Soft delete syncs properly. |
 | CRDT text guard | text edits on app-authored entries are refused without `--force` (see below) |
 | Sandbox | `sandbox` + `--db` target a throwaway copy; the `--live` gate does not apply there |
@@ -335,6 +340,10 @@ journal-cli repair-locations --to large --live    # or as large ones
 cd swift && swift build            # debug build
 tests/test_write.sh                # full suite against a store copy
 ```
+
+`JOURNAL_BACKUP_DIR=DIR` sends backups to `DIR` instead of
+`~/Backups/journal-cli/`, and makes sandbox writes take one too, which is how
+the suite tests backups.
 
 The `reference/` directory holds the original Python implementation — same
 command surface, same test suite, useful for spelunking since it needs no
