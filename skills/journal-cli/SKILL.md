@@ -9,7 +9,8 @@ description: Read and write Apple Journal entries from the terminal via the jour
 data store. All read commands take `--json`. Exit code 0 = success, 1 = error
 or refusal, with the reason on stderr prefixed `journal-cli:`.
 
-Run `journal-cli --help` for the full surface, `journal-cli doctor` to check
+Run `journal-cli --help` for the full surface, `journal-cli --version` for
+the installed version, `journal-cli doctor` to check
 access (exit 1 means Full Disk Access is missing — tell the user to grant it
 to the terminal and relaunch).
 

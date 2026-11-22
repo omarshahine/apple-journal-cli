@@ -193,7 +193,7 @@ humans:
   ANSI. `list`, `show`, `search`, `journals`, `deleted` all speak JSON.
 - **Meaningful exit codes** — `0` success, `1` refusal or error, with a
   one-line reason on stderr prefixed `journal-cli:`.
-- **`--help` / `doctor`** — full usage from the binary itself;
+- **`--help` / `--version` / `doctor`** — full usage from the binary itself;
   `doctor` reports access state and entry count, exit 1 when setup is needed.
 - **Guardrails an agent cannot stumble past** — destructive or risky paths
   (`--live`, `--force`, `--hard`) must be opted into explicitly, and every

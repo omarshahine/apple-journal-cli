@@ -56,6 +56,11 @@ open(sys.argv[1],"wb").write(png)
 PY
 printf 'not really a movie' > "$MOV"
 
+echo "T0 version"
+PKG_VERSION=$(python3 -c "import json;print(json.load(open('$ROOT/npm/package.json'))['version'])")
+ok "--version matches npm/package.json" "$("$CLI" --version 2>&1)" "journal-cli $PKG_VERSION"
+ok "--version exits 0" "$("$CLI" --version >/dev/null 2>&1; echo $?)" "0"
+
 echo "T1 guards"
 "$CLI" write --body x >/dev/null 2>&1; ok "refuses live without --live" "$?" "1"
 "$CLI" --db "$DB" write --lat 47.6 >/dev/null 2>&1; ok "lat without lon rejected" "$?" "1"
