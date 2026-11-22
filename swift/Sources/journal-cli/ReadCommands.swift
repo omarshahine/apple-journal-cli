@@ -132,7 +132,7 @@ func cmdExport(_ a: Args) {
                 // JSON string syntax is valid YAML, and escapes quotes,
                 // backslashes and newlines the way the title already does.
                 let nm = (p["name"] as? String).map { yamlString($0) } ?? "null"
-                out += "  - name: \(nm)\n    lat: \(p["lat"] ?? "null")\n    lon: \(p["lon"] ?? "null")\n"
+                out += "  - name: \(nm)\n    lat: \(yamlNumber(p["lat"]))\n    lon: \(yamlNumber(p["lon"]))\n"
             }
         }
         out += "---\n\n" + e.text + "\n"
@@ -197,6 +197,13 @@ func mdAssetText(_ assets: [[String: Any]]) -> [String] {
         if let t = a["drawing_text"] as? String, !t.isEmpty { lines.append("Drawing: \(t)") }
     }
     return lines
+}
+
+/// A numeric YAML scalar, or null. (Interpolating the raw value printed
+/// "Optional(47.6)", which YAML reads as a string.)
+private func yamlNumber(_ v: Any?) -> String {
+    guard let n = v as? NSNumber else { return "null" }
+    return n.stringValue
 }
 
 /// A double-quoted YAML scalar (JSON string syntax is a subset of YAML's).

@@ -101,7 +101,7 @@ import SQLite3
 /// passes means the input is acceptable.
 func checkLinkURL(_ urlString: String) {
     guard let u = URL(string: urlString),
-          let scheme = u.scheme, ["http", "https"].contains(scheme), u.host != nil else {
+          let scheme = u.scheme?.lowercased(), ["http", "https"].contains(scheme), u.host != nil else {
         die("--link needs an absolute http(s) URL, got '\(urlString)'")
     }
 }

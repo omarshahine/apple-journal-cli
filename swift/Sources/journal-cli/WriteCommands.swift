@@ -143,7 +143,12 @@ func cmdWrite(_ a: Args) {
         if lp != nil { bits.append("1 live photo") }
         if link != nil { bits.append("1 link") }
         if hasLoc { bits.append(String(format: "location %.5f,%.5f", lat!, lon!)) }
-        for j in a.values("--journal") + a.values("--add-journal") { bits.append("journal '\(j)'") }
+        // Resolve the journals as the real write would, so an unknown one fails here too.
+        let journals = a.values("--journal") + a.values("--add-journal")
+        if !journals.isEmpty {
+            _ = withSnapshot { db in journals.map { resolveJournal(db, $0) } }
+        }
+        for j in journals { bits.append("journal '\(j)'") }
         let f = fixedFormatter("yyyy-MM-dd HH:mm")
         print("DRY RUN: would create entry (\(bits.isEmpty ? "empty" : bits.joined(separator: ", "))) dated \(f.string(from: when)). Nothing written.")
         return

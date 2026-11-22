@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: fourth review pass
+
+- **One writer per store at a time.** A per-store lock now covers the whole
+  write: backup, database change and the file moves after it. A second
+  journal-cli write waits, and says so, instead of interleaving.
+- **A link to the real store is the real store.** A symlink or hard link passed
+  with `--db` now writes through the store's real path, so attachments and
+  backups land beside it.
+- **Temp snapshots are owner-only** from the moment they are created.
+- **Reads match what Journal shows:** built-in tip entries are no longer
+  listed, removed assets are left out, hidden ones are marked
+  `"hidden": true`, and assets come back in the entry's saved order.
+- **Markdown export** writes coordinates as numbers (`lat: 47.6`, not
+  `Optional(47.6)`).
+- **`write --dry-run` checks journal names**, and link URLs accept an uppercase
+  scheme (`HTTPS://…`).
+- Python reference: RTF is converted in bounded batches, so a large journal
+  doesn't overflow one `textutil` call.
+- Tests: the suite no longer falls back to the Python reference when there's
+  no Swift build, and the live-write guard test ignores a stray `JOURNAL_DB`.
+
 ## 1.5.2
 
 ### Fixed

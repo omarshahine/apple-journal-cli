@@ -337,8 +337,9 @@ journal-cli repair-locations --to large --live    # or as large ones
 ## Development
 
 ```sh
-(cd swift && swift build)          # debug build; the subshell keeps you at the repo root
-tests/test_write.sh                # full suite against a store copy
+(cd swift && swift build -c release)       # the subshell keeps you at the repo root
+JOURNAL_CLI=$PWD/swift/.build/release/journal-cli tests/test_write.sh
+JOURNAL_CLI=$PWD/reference/journal-cli.py tests/test_write.sh   # the Python reference
 ```
 
 `JOURNAL_BACKUP_DIR=DIR` sends backups to `DIR` instead of
