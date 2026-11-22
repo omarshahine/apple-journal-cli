@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 1.4.4
+
+### Fixed: dayone-import skill
+
+([#23](https://github.com/omarshahine/apple-journal-cli/pull/23))
+
+- **An interrupted import no longer replays its writes.** Each write is marked
+  pending before it runs and recorded as done the moment it succeeds. A resumed
+  run checks a leftover pending write against the destination by instant
+  (time-zone independent), rendered content, and a floor id taken at the start
+  of the run, so it never claims an unrelated entry. A nonzero exit after a
+  commit is checked the same way, so it isn't written twice.
+- **Rehearsal and live imports keep separate ledgers.** A ledger records its
+  journal and destination and refuses a mismatch, a sandbox picked with
+  `$JOURNAL_DB` counts as a sandbox, and a relative `--state` path works.
+- **Consistent, cleaned-up snapshots.** The Day One and Photos stores are copied
+  with SQLite's online backup API, and every snapshot is removed when its
+  connection closes.
+- **Malformed EXIF** in one photo no longer stops a location audit or repair.
+- **Text:** fenced content survives flattening, only a real Markdown heading
+  marker is stripped from a title, and unreferenced attachments are classified
+  like referenced ones.
+- The skill now has a unittest suite in CI.
 
 ### Fixed: reads, export and Markdown
 
