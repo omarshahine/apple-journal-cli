@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.3
 
 ### Fixed: data safety for live writes and reads
 
