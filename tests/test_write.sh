@@ -540,6 +540,7 @@ if [ $? -eq 0 ]; then
   ok "image syntax untouched"         "$(printf '![alt](https://e.com/i.png)' | "$CLI" render --plain)" '![alt](https://e.com/i.png)'
   ok "link destination kept literal"  "$("$CLI" render --body '[link](https://example.com/*item*)' --plain)" "link (https://example.com/*item*)"
   ok "fenced blank lines kept"          "$(printf '```\na\n\n\nb\n  \nc\n```' | "$CLI" render --plain | python3 -c 'import sys;print(repr(sys.stdin.read()))')" "'a\\n\\n\\nb\\n  \\nc'"
+  ok "trailing fenced blank lines kept" "$(printf '```\na\n\n\n```' | "$CLI" render | python3 -c 'import sys;r=sys.stdin.read();print(r[r.rindex(" a")+2:].count(chr(92)+chr(10)))')" "2"
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
   # Fixed-format dates ignore the user's calendar (-AppleLocale is a
   # Foundation argument-domain default, honored per process).

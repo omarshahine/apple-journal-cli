@@ -28,6 +28,12 @@ jobs:
         run: swift build -c release
         working-directory: swift
 
+      - name: DB text check
+        run: |
+          swiftc -O -o "$RUNNER_TEMP/db-text-check" swift/Sources/journal-cli/DB.swift \
+            swift/Sources/journal-cli/Support.swift tests/db-text-check/main.swift
+          "$RUNNER_TEMP/db-text-check"
+
       - name: Make fixture store
         id: fixture
         run: |
