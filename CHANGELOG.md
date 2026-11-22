@@ -1,8 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.5.3
 
 ### Fixed: fourth review pass
+
+([#35](https://github.com/omarshahine/apple-journal-cli/pull/35),
+[#36](https://github.com/omarshahine/apple-journal-cli/pull/36))
+
+- **dayone-import:** an import ledger now records which Journal store it
+  belongs to, so one restored on another Mac is remapped by entry UUID or
+  refused rather than pointing at unrelated entries. Resume handles a
+  daylight-saving fold, a failed remote lookup no longer overwrites the
+  published ledger, location matching works near the poles, malformed Photos
+  place data is ignored, media beside a chosen `--db` store is found, and
+  tilde (`~~~`) fences are recognized.
+- **Markdown rendering:** escapes before combining marks, image syntax and
+  tilde fences are handled correctly.
 
 - **One writer per store at a time.** A per-store lock now covers the whole
   write: backup, database change and the file moves after it. A second
