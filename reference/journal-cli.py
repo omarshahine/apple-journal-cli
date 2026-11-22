@@ -15,7 +15,10 @@ import argparse, json, os, shutil, sqlite3, stat, subprocess, sys, tempfile, uui
 GROUP = os.path.expanduser("~/Library/Group Containers/group.com.apple.moments/Library")
 DEFAULT_DB = os.path.join(GROUP, "moments.sqlite")
 VERSION = "1.4.2"                      # keep in step with npm/package.json
-BACKUPS = os.path.expanduser("~/Backups/journal-cli")
+# $JOURNAL_BACKUP_DIR overrides the backup root and, when set, backs up
+# sandbox stores too, which is how the test suite exercises backups.
+BACKUP_OVERRIDE = os.environ.get("JOURNAL_BACKUP_DIR") or None
+BACKUPS = BACKUP_OVERRIDE or os.path.expanduser("~/Backups/journal-cli")
 EPOCH = 978307200                      # Core Data reference date -> unix epoch
 
 # Core Data entity ids (Z_ENT), from Z_PRIMARYKEY
@@ -71,21 +74,40 @@ def journal_running():
 
 # ---------------------------------------------------------------- store access
 
+def sqlite_backup(src, dst):
+    """Copy a store into one consistent file with SQLite's online backup API.
+
+    Copying the db, -wal and -shm one after another could mix generations if
+    Journal checkpointed in between; the backup API reads every page inside a
+    single read transaction. The source is opened read-only.
+    """
+    from urllib.parse import quote
+    s = sqlite3.connect(f"file:{quote(os.path.abspath(src))}?mode=ro", uri=True, timeout=5)
+    try:
+        d = sqlite3.connect(dst)
+        try:
+            s.backup(d)
+        finally:
+            d.close()
+    finally:
+        s.close()
+
+
 class Snapshot:
-    """Read-only: copy the store aside so the live database is never touched."""
+    """Read-only: a consistent copy of the store, so the live one is never written."""
     def __enter__(self):
         if not os.path.exists(DB):
             die(f"store not found at {DB}")
         self.dir = tempfile.mkdtemp(prefix="journal-cli.")
-        base = os.path.basename(DB)
+        copy = os.path.join(self.dir, os.path.basename(DB))
         try:
-            for suf in ("", "-wal", "-shm"):
-                if os.path.exists(DB + suf):
-                    shutil.copy2(DB + suf, os.path.join(self.dir, base + suf))
-        except PermissionError:
+            sqlite_backup(DB, copy)
+        except sqlite3.Error as e:
             shutil.rmtree(self.dir, ignore_errors=True)
-            die("permission denied. Grant Full Disk Access to this terminal, then relaunch it.")
-        self.conn = sqlite3.connect(os.path.join(self.dir, base))
+            if not os.access(DB, os.R_OK):
+                die("permission denied. Grant Full Disk Access to this terminal, then relaunch it.")
+            die(f"could not snapshot the store: {e}")
+        self.conn = sqlite3.connect(copy)
         self.conn.row_factory = sqlite3.Row
         return self.conn
     def __exit__(self, *e):
@@ -94,14 +116,53 @@ class Snapshot:
 
 
 def backup(reason="write"):
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    d = os.path.join(BACKUPS, f"{ts}-{reason}")
-    os.makedirs(d, exist_ok=True)
-    base = os.path.basename(DB)
-    for suf in ("", "-wal", "-shm"):
-        if os.path.exists(DB + suf):
-            shutil.copy2(DB + suf, os.path.join(d, base + suf))
+    """Back up the store before a live write. Fails closed, one folder per call."""
+    try:
+        os.makedirs(BACKUPS, exist_ok=True)
+    except OSError as e:
+        die(f"backup failed: cannot create {BACKUPS}: {e.strerror}\n  Nothing was written.")
+    stem = os.path.join(BACKUPS, datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{reason}")
+    d, n = stem, 1
+    while True:
+        try:
+            os.mkdir(d); break
+        except FileExistsError:
+            n += 1; d = f"{stem}-{n}"
+        except OSError as e:
+            die(f"backup failed: cannot create {d}: {e.strerror}\n  Nothing was written.")
+    try:
+        sqlite_backup(DB, os.path.join(d, os.path.basename(DB)))
+    except sqlite3.Error as e:
+        die(f"backup failed: {e}\n  Nothing was written.")
     return d
+
+
+# Filesystem side effects of the open live write: folders it created (removed
+# again if it aborts) and folders to remove, which wait for the commit and move
+# into the write's backup when it has one.
+LIVE_FILES = None
+
+def stage_created(path):
+    if LIVE_FILES is not None: LIVE_FILES["created"].append(path)
+
+def schedule_removal(path):
+    if LIVE_FILES is not None: LIVE_FILES["removals"].append(path)
+    elif os.path.isdir(path): shutil.rmtree(path, ignore_errors=True)
+
+def apply_removals(files, backup_dir):
+    root = attach_dir()
+    for path in files["removals"]:
+        if not os.path.exists(path): continue
+        if not backup_dir:
+            shutil.rmtree(path, ignore_errors=True); continue
+        rel = os.path.relpath(path, root) if path.startswith(root + os.sep) else os.path.basename(path)
+        dest = os.path.join(backup_dir, "Attachments", rel)
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.move(path, dest)
+        except OSError as e:
+            print(f"journal-cli: warning: kept {path} (could not move it into the backup: {e})",
+                  file=sys.stderr)
 
 
 RISK_MARKER = os.path.expanduser("~/.config/journal-cli/risk-accepted")
@@ -159,14 +220,37 @@ class Live:
             ensure_risk_accepted(self.accept)
             if journal_running():
                 die("Journal.app is running. Quit it first, then retry.")
-            print(f"backup: {backup()}", file=sys.stderr)
+        self.backup = None
+        if self.is_default or BACKUP_OVERRIDE:
+            self.backup = backup()
+            print(f"backup: {self.backup}", file=sys.stderr)
+        global LIVE_FILES
+        LIVE_FILES = self.files = {"created": [], "removals": []}
         self.conn = sqlite3.connect(DB)
         self.conn.row_factory = sqlite3.Row
         return self.conn
     def __exit__(self, exc_type, *rest):
-        if exc_type: self.conn.rollback()
-        else: self.conn.commit()
-        self.conn.close()
+        global LIVE_FILES
+        LIVE_FILES = None
+        try:
+            if not exc_type:
+                self.conn.commit()        # a failed commit lands in the except below
+                committed = True
+            else:
+                committed = False
+        except BaseException:
+            committed = False
+            raise
+        finally:
+            if not committed:
+                try: self.conn.rollback()
+                except sqlite3.Error: pass
+            self.conn.close()
+            if not committed:
+                for p in reversed(self.files["created"]):
+                    shutil.rmtree(p, ignore_errors=True)
+        if committed:                     # only a committed write removes files
+            apply_removals(self.files, self.backup)
 
 
 # ---------------------------------------------------------------- RTF
@@ -721,14 +805,25 @@ def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index,
     elif ext in PHOTO_EXT: name = "image"
     else: die(f"unsupported media type {ext!r} ({src_path})")
     rel_dir = os.path.join(entry_uuid, asset_uuid)
+    entry_dir = os.path.join(attach_dir(), entry_uuid)
     abs_dir = os.path.join(attach_dir(), rel_dir)
-    os.makedirs(abs_dir, exist_ok=True)
+    new_entry, new_asset = not os.path.exists(entry_dir), not os.path.exists(abs_dir)
+    # Staged before creating, so a failure part way through still cleans up.
+    if new_entry: stage_created(entry_dir)
+    elif new_asset: stage_created(abs_dir)
+    try:
+        os.makedirs(abs_dir, exist_ok=True)
+    except OSError as e:
+        die(f"cannot create attachment folder {abs_dir}: {e.strerror}")
     fname = f"{uid()}{ext}" if plain_name else f"{uid()}_resized{ext}"
     dst = os.path.join(abs_dir, fname)
-    if name == "image" and resize:
-        resize_into(src_path, dst)
-    else:
-        shutil.copy2(src_path, dst)
+    try:
+        if name == "image" and resize:
+            resize_into(src_path, dst)
+        else:
+            shutil.copy2(src_path, dst)
+    except OSError as e:
+        die(f"cannot copy {src_path} into the store: {e.strerror}")
     ent, pk = next_pk(conn, "file")
     conn.execute("""
         insert into ZJOURNALENTRYASSETFILEATTACHMENTMO
@@ -739,9 +834,21 @@ def add_file(conn, asset_pk, asset_uuid, entry_uuid, src_path, index,
          os.path.join(rel_dir, fname), name, index))
     return pk
 
+def read_body_file(path):
+    """A read failure must not look like an empty body: `edit` would clear the text."""
+    try:
+        with open(os.path.expanduser(path), "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        die(f"cannot read --body-file: {path} ({e.strerror})")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        die(f"--body-file is not valid UTF-8: {path}")
+
 def cmd_write(a):
     body = a.body
-    if a.body_file: body = open(a.body_file, errors="replace").read()
+    if a.body_file: body = read_body_file(a.body_file)
     if body is None and stdin_has_data(): body = sys.stdin.read() or None
     media = [os.path.abspath(os.path.expanduser(m)) for m in (a.media or [])]
     for m in media:
@@ -909,14 +1016,13 @@ def remove_assets(conn, entry_pk, entry_uuid, asset_pks):
         conn.execute("delete from ZJOURNALENTRYASSETMO where Z_PK=?", (apk,))
         gone_uuids.append(au)
         if entry_uuid and au:
-            d = os.path.join(attach_dir(), entry_uuid, au)
-            if os.path.isdir(d): shutil.rmtree(d, ignore_errors=True)
+            schedule_removal(os.path.join(attach_dir(), entry_uuid, au))
     if gone_uuids: ordering_drop(conn, entry_pk, gone_uuids)
     return len(gone_uuids)
 
 def cmd_edit(a):
     body = a.body
-    if a.body_file: body = open(a.body_file, errors="replace").read()
+    if a.body_file: body = read_body_file(a.body_file)
     if body is None and stdin_has_data(): body = sys.stdin.read() or None
 
     media = [os.path.abspath(os.path.expanduser(m)) for m in (a.add_media or [])]
@@ -1096,8 +1202,7 @@ def cmd_delete(a):
             conn.execute("delete from ZJOURNALENTRYMO where Z_PK=?", (a.id,))
             eu = u_str(row["ZID"])
             if eu:
-                d = os.path.join(attach_dir(), eu)
-                if os.path.isdir(d): shutil.rmtree(d, ignore_errors=True)
+                schedule_removal(os.path.join(attach_dir(), eu))
             what = f"hard-deleted (with {len(apks)} assets)"
         else:
             conn.execute("""update ZJOURNALENTRYMO
@@ -1175,8 +1280,7 @@ def cmd_empty(a):
             conn.execute("delete from Z_5JOURNALS where Z_5ENTRIES=?", (r["Z_PK"],))
             conn.execute("delete from ZJOURNALENTRYMO where Z_PK=?", (r["Z_PK"],))
             if eu:
-                d = os.path.join(attach_dir(), eu)
-                if os.path.isdir(d): shutil.rmtree(d, ignore_errors=True)
+                schedule_removal(os.path.join(attach_dir(), eu))
             purged += 1
     msg = f"Purged {purged} entr{'y' if purged==1 else 'ies'}."
     if skipped:
@@ -1274,13 +1378,23 @@ def cmd_sandbox(a):
         die(f"source store not found: {src}")
     os.makedirs(a.dir, exist_ok=True)
     base = "moments.sqlite"
+    dst = os.path.join(a.dir, base)
+    if os.path.realpath(src) == os.path.realpath(dst):
+        die(f"sandbox --from and --dir name the same store: {src}")
+    # Copy beside the destination and swap it in only once the copy is good,
+    # so a failed copy never costs the store that was already there.
+    tmp = f"{dst}.journal-cli-{uid()}"
     try:
-        for suf in ("", "-wal", "-shm"):
-            if os.path.exists(src + suf):
-                shutil.copy2(src + suf, os.path.join(a.dir, base + suf))
-    except PermissionError:
-        die(f"permission denied reading {src}\n"
-            "  Grant Full Disk Access, or seed from a backup with --from.")
+        sqlite_backup(src, tmp)
+    except sqlite3.Error as e:
+        if os.path.exists(tmp): os.remove(tmp)
+        if not os.access(src, os.R_OK):
+            die(f"permission denied reading {src}\n"
+                "  Grant Full Disk Access, or seed from a backup with --from.")
+        die(f"could not copy {src}: {e}")
+    for suf in ("-wal", "-shm"):
+        if os.path.exists(dst + suf): os.remove(dst + suf)
+    os.replace(tmp, dst)
     os.makedirs(os.path.join(a.dir, "Attachments"), exist_ok=True)
     print(os.path.join(a.dir, base))
 

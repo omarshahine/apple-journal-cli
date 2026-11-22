@@ -10,7 +10,12 @@ var DEFAULT_DB: String {
     NSHomeDirectory() + "/Library/Group Containers/group.com.apple.moments/Library/moments.sqlite"
 }
 
-var BACKUPS_DIR: String { NSHomeDirectory() + "/Backups/journal-cli" }
+/// `$JOURNAL_BACKUP_DIR` overrides the backup root and, when set, backs up
+/// sandbox stores too, which is how the test suite exercises backups.
+var BACKUP_OVERRIDE: String? {
+    ProcessInfo.processInfo.environment["JOURNAL_BACKUP_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+}
+var BACKUPS_DIR: String { BACKUP_OVERRIDE ?? (NSHomeDirectory() + "/Backups/journal-cli") }
 
 func attachDir() -> String {
     (URL(fileURLWithPath: DB_PATH).deletingLastPathComponent()
@@ -22,8 +27,13 @@ func externalDataDir() -> String {
         .appendingPathComponent(".moments_SUPPORT/_EXTERNAL_DATA")).path
 }
 
+/// Run before exit by `die`. A live write sets it to remove the attachment
+/// folders it created, since its database rows roll back with the exit.
+var DIE_CLEANUP: (() -> Void)?
+
 func die(_ msg: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write("journal-cli: \(msg)\n".data(using: .utf8)!)
+    if let cleanup = DIE_CLEANUP { DIE_CLEANUP = nil; cleanup() }
     exit(code)
 }
 

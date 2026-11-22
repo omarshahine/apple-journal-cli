@@ -585,6 +585,76 @@ else
   echo "T17 markdown rendering (skipped: this CLI has no --markdown)"
 fi
 
+echo "T18 data safety"
+ent_count(){ sqlite3 "$DB" "select count(*) from ZJOURNALENTRYMO;"; }
+SOUT=$("$CLI" --db "$DB" write --body "Keep this text." 2>&1)
+SPK=$(echo "$SOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+# An unreadable --body-file must refuse the edit, not clear the body.
+"$CLI" --db "$DB" edit $SPK --body-file "$SB/no-such-file.txt" >/dev/null 2>&1
+ok "missing --body-file refused" "$?" "1"
+ok "missing --body-file keeps text" "$("$CLI" --db "$DB" show $SPK --json | jq_ 'd["text"]')" "Keep this text."
+printf '\xff\xfe bad bytes' > "$SB/bad.txt"
+"$CLI" --db "$DB" edit $SPK --body-file "$SB/bad.txt" >/dev/null 2>&1
+ok "non-UTF-8 --body-file refused" "$?" "1"
+ok "non-UTF-8 --body-file keeps text" "$("$CLI" --db "$DB" show $SPK --json | jq_ 'd["text"]')" "Keep this text."
+
+# Backups: one folder per write, a usable store in each, and fail closed.
+BK="$SB/backups"
+JOURNAL_BACKUP_DIR="$BK" "$CLI" --db "$DB" write --body "backup one" >/dev/null 2>&1
+JOURNAL_BACKUP_DIR="$BK" "$CLI" --db "$DB" write --body "backup two" >/dev/null 2>&1
+ok "each write gets its own backup" "$(find "$BK" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" "2"
+ok "backups are valid stores" "$(for f in "$BK"/*/moments.sqlite; do sqlite3 "$f" 'PRAGMA integrity_check;'; done | sort -u)" "ok"
+: > "$SB/not-a-dir"
+N0=$(ent_count)
+JOURNAL_BACKUP_DIR="$SB/not-a-dir" "$CLI" --db "$DB" write --body "no backup, no write" >/dev/null 2>&1
+ok "failed backup refuses the write" "$?" "1"
+ok "failed backup wrote nothing" "$(ent_count)" "$N0"
+
+# Removed media moves into that write's backup instead of being deleted.
+QOUT=$("$CLI" --db "$DB" write --body "Recoverable pic." --media "$IMG" 2>&1)
+QPK=$(echo "$QOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+QUUID=$("$CLI" --db "$DB" show $QPK --json | jq_ 'd["uuid"]')
+QAID=$("$CLI" --db "$DB" show $QPK --json | jq_ '[a for a in d["assets"] if a["type"]=="photo"][0]["id"]')
+# A failed edit must not delete files whose rows roll back.
+"$CLI" --db "$DB" edit $QPK --remove-media $QAID --add-journal "No Such Journal $$" >/dev/null 2>&1
+ok "failed edit refused" "$?" "1"
+ok "failed edit keeps the asset row" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$QPK;")" "1"
+ok "failed edit keeps the files" "$(find "$ATT/$QUUID" -type f 2>/dev/null | wc -l | tr -d ' ')" "1"
+BK2="$SB/backups2"
+JOURNAL_BACKUP_DIR="$BK2" "$CLI" --db "$DB" edit $QPK --remove-media $QAID >/dev/null 2>&1
+ok "removed media leaves the store" "$(find "$ATT/$QUUID" -type f 2>/dev/null | wc -l | tr -d ' ')" "0"
+ok "removed media is in the backup" "$(find "$BK2" -path "*/Attachments/$QUUID/*" -type f | wc -l | tr -d ' ')" "1"
+HOUT=$("$CLI" --db "$DB" write --body "Hard delete me." --media "$IMG" 2>&1)
+HPK=$(echo "$HOUT" | grep -oE 'entry [0-9]+' | grep -oE '[0-9]+')
+HUUID=$("$CLI" --db "$DB" show $HPK --json | jq_ 'd["uuid"]')
+BK3="$SB/backups3"
+JOURNAL_BACKUP_DIR="$BK3" "$CLI" --db "$DB" delete $HPK --hard >/dev/null 2>&1
+ok "hard delete keeps media in the backup" "$(find "$BK3" -path "*/Attachments/$HUUID/*" -type f | wc -l | tr -d ' ')" "1"
+
+# A write whose attachment copy fails commits nothing and leaves no folders.
+SB2=$(mktemp -d /tmp/journal-sandbox2.XXXXXX)
+DB2=$("$CLI" sandbox --dir "$SB2" --from "$DB")
+ok "sandbox copy is a valid store" "$(sqlite3 "$DB2" 'PRAGMA integrity_check;')" "ok"
+N2A=$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")
+"$CLI" sandbox --dir "$SB2" --from "$DB2" >/dev/null 2>&1
+ok "sandbox onto its own source refused" "$?" "1"
+ok "sandbox onto its own source keeps it" "$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")" "$N2A"
+"$CLI" sandbox --dir "$SB2" --from "$SB2/no-such.sqlite" >/dev/null 2>&1
+ok "failed sandbox copy keeps the old store" "$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")" "$N2A"
+trash "$SB2/Attachments" 2>/dev/null || mv "$SB2/Attachments" "$SB2/Attachments.old"
+: > "$SB2/Attachments"
+N2=$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")
+"$CLI" --db "$DB2" write --body "copy fails" --media "$IMG" >/dev/null 2>&1
+ok "attachment failure refuses the write" "$?" "1"
+ok "attachment failure wrote nothing" "$(sqlite3 "$DB2" "select count(*) from ZJOURNALENTRYMO;")" "$N2"
+trash "$SB2" 2>/dev/null
+DIRS0=$(find "$ATT" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+N3=$(ent_count)
+"$CLI" --db "$DB" write --body "aborted" --media "$IMG" --journal "No Such Journal $$" >/dev/null 2>&1
+ok "aborted write refused" "$?" "1"
+ok "aborted write wrote nothing" "$(ent_count)" "$N3"
+ok "aborted write leaves no folders" "$(find "$ATT" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" "$DIRS0"
+
 echo "T8 integrity"
 ok "integrity_check" "$(sqlite3 "$DB" 'PRAGMA integrity_check;' | head -1)" "ok"
 SEEDCOUNT=$(sqlite3 "${JOURNAL_SEED:-$DB}" 'select count(*) from ZJOURNALENTRYMO;' 2>/dev/null)

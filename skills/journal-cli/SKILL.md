@@ -16,8 +16,8 @@ to the terminal and relaunch).
 
 ## Reading (always safe)
 
-Reads copy the store to a temp snapshot first — safe while Journal.app is
-open, no locks, no mutation.
+Reads work from a temp snapshot (SQLite's online backup API, read-only):
+safe while Journal.app is open, and they never write the store.
 
 ```sh
 journal-cli list --limit 20 --json          # newest first
@@ -40,7 +40,9 @@ plus per-type extras: `places[]` with lat/lon/name for locations, `url` and
 
 Live writes need `--live`, refuse while Journal.app is running (quit it
 first: `osascript -e 'tell application "Journal" to quit'`), and auto-backup
-to `~/Backups/journal-cli/` before touching anything.
+to `~/Backups/journal-cli/` before touching anything; a failed backup refuses
+the write. Removed media moves into that backup. An unreadable `--body-file`
+is an error, not an empty body.
 
 ```sh
 journal-cli write --live --title T --body B [--date YYYY-MM-DD] [--bookmark]

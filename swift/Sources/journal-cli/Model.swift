@@ -264,12 +264,25 @@ func addFile(_ db: DB, assetPK: Int64, assetUUID: String, entryUUID: String,
     else if PHOTO_EXT.contains(e) { name = "image" }
     else { die("unsupported media type '.\(e)' (\(srcPath))") }
     let relDir = entryUUID + "/" + assetUUID
-    let absDir = attachDir() + "/" + relDir
-    try? FileManager.default.createDirectory(atPath: absDir, withIntermediateDirectories: true)
+    let fm = FileManager.default
+    let entryDir = attachDir() + "/" + entryUUID
+    let absDir = entryDir + "/" + assetUUID
+    // Note what this write creates, so an abort can take it back out.
+    let newEntryDir = !fm.fileExists(atPath: entryDir)
+    let newAssetDir = !fm.fileExists(atPath: absDir)
+    // Staged before creating, so a failure part way through still cleans up.
+    if newEntryDir { stageCreated(entryDir) } else if newAssetDir { stageCreated(absDir) }
+    do { try fm.createDirectory(atPath: absDir, withIntermediateDirectories: true) }
+    catch { die("cannot create attachment folder \(absDir): \(error.localizedDescription)") }
     let fname = plainName ? "\(uid()).\(e)" : "\(uid())_resized.\(e)"
     let dst = absDir + "/" + fname
-    if name == "image" && resize { resizeInto(srcPath, dst) }
-    else { try? FileManager.default.copyItem(atPath: srcPath, toPath: dst) }
+    do {
+        if name == "image" && resize { try resizeInto(srcPath, dst) }
+        else { try fm.copyItem(atPath: srcPath, toPath: dst) }
+    } catch {
+        die("cannot copy \(srcPath) into the store: \(error.localizedDescription)")
+    }
+    guard fm.fileExists(atPath: dst) else { die("cannot copy \(srcPath) into the store") }
     let (entID, pk) = nextPK(db, "JournalEntryAssetFileAttachmentMO")
     db.exec("""
         insert into ZJOURNALENTRYASSETFILEATTACHMENTMO
@@ -333,9 +346,7 @@ func removeAssets(_ db: DB, entryPK: Int64, entryUUID: String?, assetPKs: [Int64
         db.exec("delete from ZJOURNALENTRYASSETMO where Z_PK=?", [apk])
         if let au = au {
             gone.insert(au)
-            if let eu = entryUUID {
-                try? FileManager.default.removeItem(atPath: attachDir() + "/" + eu + "/" + au)
-            }
+            if let eu = entryUUID { scheduleRemoval(attachDir() + "/" + eu + "/" + au) }
         }
     }
     if !gone.isEmpty { orderingDrop(db, entryPK, gone) }
