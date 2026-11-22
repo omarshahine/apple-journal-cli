@@ -399,6 +399,12 @@ def _remap_moved(args, state, state_path, other_store):
             "store. Move it aside to import from scratch, or run on the Mac "
             "that wrote it." % (state_path, other_store, len(bad) + len(idless),
                                 (bad or idless)[0]))
+    # A pending write from the other store's run carries that store's id
+    # floor, which says nothing about ids here: the entry may have synced in
+    # below it. Keep its instant and rendered words as its identity, drop the
+    # floor, and let reconcile_pending settle it against this store's rows.
+    for info in state["pending"].values():
+        info["floor_pk"] = 0
     if not getattr(args, "dry_run", False):
         save_state(state_path, state)        # now this store's ids and tag
 
@@ -772,6 +778,7 @@ def cmd_import(args):
         rows = _destination_rows(args.cli, args.target_db)
         reconcile_pending(args, state, state_path, rows)
         _record_dest(state, rows)
+        save_state(state_path, state)       # keep them even if nothing is left to write
         # Anything this run creates gets an id above this.
         floor_pk = max([r["id"] for r in rows] or [0])
 

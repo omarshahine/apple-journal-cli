@@ -37,7 +37,9 @@ private let FENCE_OPEN = rx("^[ \\t]*(`{3,}|~{3,})(.*)$")
 private let FENCE_CLOSE = rx("^[ \\t]*(`{3,}|~{3,})[ \\t]*$")
 // Image syntax is outside this subset and must survive as written: hidden
 // whole before the emphasis passes, so "/_full_/" in its url stays intact.
-private let IMAGE = rx("!\\[[^\\]]*\\]\\([^)\\s]+(?:\\s+\"[^\"]*\")?\\)")
+// The destination is read whole: an <angle-bracket> form, or a url that may
+// hold balanced parentheses ("a(b)/_full_/x.jpg"), as CommonMark allows.
+private let IMAGE = rx("!\\[[^\\]]*\\]\\((?:<[^>\\n]*>|(?:[^()\\s]|\\([^()\\s]*\\))+)(?:\\s+\"[^\"]*\")?\\)")
 
 /// The fence run that opens a block on this line, or nil.
 private func fenceOpen(_ line: String) -> String? {

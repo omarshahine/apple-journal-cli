@@ -558,6 +558,7 @@ if [ $? -eq 0 ]; then
   # emphasis passes, and tilde fences are fences.
   ok "escape before a combining mark"  "$(printf '\\*\xcc\x81literal*' | "$CLI" render --inline)" "$(printf '*\xcc\x81literal*')"
   ok "image url keeps underscores"     "$("$CLI" render --body '![photo](https://example.com/_full_/image.jpg)' --inline)" '![photo](https://example.com/_full_/image.jpg)'
+  ok "image url with parentheses"      "$("$CLI" render --body '![photo](https://example.com/a(b)/_full_/image.jpg)' --inline)" '![photo](https://example.com/a(b)/_full_/image.jpg)'
   ok "tilde fence keeps its content"   "$(printf '~~~\n**x**\n```\n~~~\nafter' | "$CLI" render --plain)" "$(printf '**x**\n```\nafter')"
   # --- third review pass (Markdown): nested emphasis and private-use text ---
   ok "nested bold stays bold"          "$("$CLI" render --body '**outer __inner__ outer**' | grep -c 'b0')" "0"

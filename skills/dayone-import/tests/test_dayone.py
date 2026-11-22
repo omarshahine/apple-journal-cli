@@ -1044,6 +1044,41 @@ class ImportTests(Tmp):
         self.assertEqual(led["done"]["A" * 32], 555)
         self.assertEqual(led["meta"]["store"], "STORE-HERE")
 
+    def test_pending_write_from_another_store_settles_below_its_old_floor(self):
+        # B was interrupted on the other Mac after landing there (floor 900);
+        # it synced in here as entry 50, below that floor.
+        mock.patch.object(di, "REAL_STORE", self._store("here.sqlite", "STORE-HERE")).start()
+        self.addCleanup(mock.patch.stopall)
+        path = self._tagged_ledger({"A" * 32: 100}, "STORE-THERE", {"A" * 32: "J-A"})
+        with open(path) as fh:
+            led = json.load(fh)
+        b_date = self._local_date("B" * 32)
+        led["pending"] = {"B" * 32: {"date": b_date, "epoch": di._wall_epoch(b_date),
+                                     "epochs": di._wall_epochs(b_date), "floor_pk": 900,
+                                     "fp": di._fingerprint("Second", "body two")}}
+        with open(path, "w") as fh:
+            json.dump(led, fh)
+        cli = FakeCLI()
+        cli.add(self._local_date("A" * 32), "First", "body one", pk=555, uuid="J-A")
+        cli.add(b_date, "Second", "body two", pk=50, uuid="J-B")
+        self.run_import(cli)
+        self.assertEqual(len(cli.writes), 1)          # only C: B was not duplicated
+        with open(path) as fh:
+            self.assertEqual(json.load(fh)["done"]["B" * 32], 50)
+
+    def test_uuids_collected_on_a_run_with_nothing_to_write_are_saved(self):
+        cli = FakeCLI()
+        self.run_import(cli)
+        path = di.ledger_path(self.args(), "Travel")
+        with open(path) as fh:
+            led = json.load(fh)
+        led["dest"] = {}
+        with open(path, "w") as fh:
+            json.dump(led, fh)
+        self.run_import(cli)                          # everything already done
+        with open(path) as fh:
+            self.assertEqual(len(json.load(fh)["dest"]), 3)
+
     def test_ledger_from_another_store_without_entry_uuids_is_refused(self):
         mock.patch.object(di, "REAL_STORE", self._store("here.sqlite", "STORE-HERE")).start()
         self.addCleanup(mock.patch.stopall)
