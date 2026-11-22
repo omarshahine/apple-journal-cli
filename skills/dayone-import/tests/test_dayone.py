@@ -222,6 +222,17 @@ class TextTests(Tmp):
         e = self.entries("Title\n```\n---\n```")[0]
         self.assertEqual(e["body"], "---")
 
+    def test_every_removed_reference_is_accounted_for(self):
+        # A pdfAttachment (or any unresolvable) reference is taken out of the
+        # text, so it must show up as missing rather than vanish.
+        pdf = "9" * 32
+        e = self.entries("Notes\nsee ![](dayone-moment:/pdfAttachment/%s) and "
+                         "![](dayone-moment:/weird)" % pdf)[0]
+        self.assertNotIn("dayone-moment", e["body_md"])
+        gone = {m["uuid"] for m in e["missing"]}
+        self.assertIn(pdf, gone)
+        self.assertTrue(any("weird" in g.lower() for g in gone), gone)
+
     def test_longer_fence_keeps_a_shorter_fence_as_content(self):
         md = "````\n```\n---\n````"
         self.assertEqual(dayone.markdown_to_text(md), "```\n---")
