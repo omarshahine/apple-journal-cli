@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Hidden assets** (which Journal treats as absent) are left out of Markdown
+  export and marked "(hidden in Journal)" in `show`.
+- **Markdown rendering** leaves image syntax alone even with nested brackets
+  in the label, nested parentheses in the URL, or a `'single-quoted'` title.
+- **dayone-import** refuses a ledger tagged with a Journal store when the
+  destination store's identity can't be read, instead of skipping the check.
+
 ## 1.5.3
 
 ### Fixed: fourth review pass
