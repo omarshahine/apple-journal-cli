@@ -559,6 +559,9 @@ if [ $? -eq 0 ]; then
   BAID=$("$CLI" --db "$DB" show $BPK2 --json | jq_ '[a for a in d["assets"] if a["type"]=="photo"][0]["id"]')
   "$CLI" edit --remove-media $BAID --db "$DB" $BPK2 >/dev/null 2>&1
   ok "--db ends a list option's values" "$(sqlite3 "$DB" "select count(*) from ZJOURNALENTRYASSETMO where ZENTRY=$BPK2;")" "0"
+  ok "image label with nested brackets stays literal" "$("$CLI" render --body '![a [b] c](https://example.com/_full_/image.jpg)' --plain)" '![a [b] c](https://example.com/_full_/image.jpg)'
+  ok "image with a single-quoted title stays literal" "$("$CLI" render --body "![x](https://e.com/_a_ 'T _b_')" --plain)" "![x](https://e.com/_a_ 'T _b_')"
+  ok "image URL with nested parentheses stays literal" "$("$CLI" render --body '![x](https://e.com/((_a_)))' --plain)" '![x](https://e.com/((_a_)))'
   ok "fence-like line inside a block"  "$(printf '```\n```literal\n**x**\n```\nafter' | "$CLI" render --plain)" "$(printf '```literal\n**x**\nafter')"
   # Fourth review pass: escapes are scalars (an escaped "*" followed by a
   # combining accent stays a literal "*"), image syntax is hidden from the
@@ -908,6 +911,9 @@ ok "removed assets are not read" "$("$CLI" --db "$DB" show $OPK --json | jq_ 'le
 HAID=$("$CLI" --db "$DB" show $OPK --json | jq_ 'd["assets"][0]["id"]')
 sqlite3 "$DB" "update ZJOURNALENTRYASSETMO set ZISHIDDEN=1 where Z_PK=$HAID;"
 ok "hidden assets are flagged" "$("$CLI" --db "$DB" show $OPK --json | jq_ 'd["assets"][0].get("hidden")')" "True"
+ok "plain show marks hidden assets" "$("$CLI" --db "$DB" show $OPK | grep -c '(hidden in Journal)')" "1"
+EXH="$SB/exp-hidden"; "$CLI" --db "$DB" export --dir "$EXH" >/dev/null 2>&1
+ok "export leaves hidden assets out" "$(entryfiles "$EXH" "$OPK" | while IFS= read -r f; do grep -c '^!\[' "$f"; done)" "0"
 
 # write --dry-run resolves journals; URL schemes are case-insensitive.
 "$CLI" --db "$DB" write --body x --journal "No Such Journal $$" --dry-run >/dev/null 2>&1

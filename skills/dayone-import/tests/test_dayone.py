@@ -1178,6 +1178,21 @@ class ImportTests(Tmp):
                 di.load_state(di.ledger_path(self.args(), "Travel"), "Travel",
                               None, self.p("other-DayOne.sqlite"))
 
+    def test_store_tagged_ledger_refused_when_store_identity_is_unreadable(self):
+        # The ledger says which Journal store its ids belong to; if this
+        # store's identity can't be read, nothing confirms they match.
+        path = di.ledger_path(self.args(), "Travel")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump({"done": {"A" * 32: 100}, "failed": {}, "pending": {},
+                       "meta": {"journal": "Travel", "target": "live",
+                                "source": di._source_id(self.db),
+                                "store": "11111111-2222-3333-4444-555555555555"}}, fh)
+        with mock.patch.object(di, "_store_id", lambda *a, **k: None):
+            with self.assertRaises(SystemExit):
+                with redirect_stderr(io.StringIO()):
+                    di.load_state(path, "Travel", None, self.db)
+
     def test_relative_state_path_works(self):
         cwd = os.getcwd()
         os.chdir(self.tmp)

@@ -54,6 +54,11 @@ func cmdShow(_ a: Args) {
     print(e.text.isEmpty ? "(no text)" : e.text)
     for asset in assets {
         let aid = asset["id"] as? Int64 ?? 0
+        if (asset["hidden"] as? Bool) == true {
+            // Journal treats it as absent; say so instead of showing it as content.
+            print("\n\(asset["type"] ?? "asset") (asset \(aid))  (hidden in Journal)")
+            continue
+        }
         if asset["transcript"] != nil || asset["duration"] != nil {
             let dur = (asset["duration"] as? Double).map { String(format: "%.1fs", $0) } ?? ""
             let tr = (asset["transcript"] as? String).map { "  \"\($0)\"" } ?? ""
@@ -125,6 +130,8 @@ func cmdExport(_ a: Args) {
         var out = "---\ndate: \(e.date ?? "")\nid: \(e.id)\n"
         if !e.title.isEmpty { out += "title: \(yamlString(e.title))\n" }
         if e.bookmarked { out += "bookmarked: true\n" }
+        // Journal shows hidden assets as absent, so the export leaves them out.
+        let assets = assets.filter { ($0["hidden"] as? Bool) != true }
         let places = assets.flatMap { ($0["places"] as? [[String: Any]]) ?? [] }
         if !places.isEmpty {
             out += "locations:\n"

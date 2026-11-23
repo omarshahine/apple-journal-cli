@@ -652,6 +652,10 @@ def cmd_show(a):
     print()
     print(e["text"] or "(no text)")
     for asset in e["assets"]:
+        if asset.get("hidden"):
+            # Journal treats it as absent; say so instead of showing it as content.
+            print(f"\n{asset.get('type') or 'asset'} (asset {asset['id']})  (hidden in Journal)")
+            continue
         if asset.get("transcript") is not None or asset.get("duration") is not None:
             dur = f"{asset['duration']:.1f}s" if asset.get("duration") else ""
             tr = f'  "{asset["transcript"]}"' if asset.get("transcript") else ""
@@ -709,20 +713,22 @@ def _export_md(a, ents):
             f.write(f"---\ndate: {e['date']}\nid: {e['id']}\n")
             if e["title"]: f.write(f"title: {json.dumps(e['title'])}\n")
             if e["bookmarked"]: f.write("bookmarked: true\n")
-            places = [p for asset in e["assets"] for p in asset.get("places", [])]
+            # Journal shows hidden assets as absent, so the export leaves them out.
+            shown = [x for x in e["assets"] if not x.get("hidden")]
+            places = [p for asset in shown for p in asset.get("places", [])]
             if places:
                 f.write("locations:\n")
                 for p in places:
                     f.write(f"  - name: {json.dumps(p.get('name'))}\n"
                             f"    lat: {yaml_num(p.get('lat'))}\n    lon: {yaml_num(p.get('lon'))}\n")
             f.write("---\n\n" + e["text"] + "\n")
-            files = [x for asset in e["assets"] for x in asset["files"]]
+            files = [x for asset in shown for x in asset["files"]]
             if files:
                 f.write("\n")
                 for x in files:
                     f.write(f"![{md_label(x['name'] or 'file')}]({md_dest(x['path'])})\n")
             # Content that lives in assets rather than files.
-            extras = md_asset_text(e["assets"])
+            extras = md_asset_text(shown)
             if extras:
                 f.write("\n" + "\n".join(extras) + "\n")
 

@@ -259,6 +259,13 @@ def load_state(path, journal_name, target_db=None, source_db=None):
                 "--state to choose another." % (path, meta["source"], source))
         if meta.get("source") is None or meta.get("target") is None:
             state["_retag"] = True           # tagged by an older version: save the full tag
+        if meta.get("store") and not store:
+            # The ledger says which store its ids belong to, and this one's
+            # identity can't be read: nothing confirms they match. Fail closed.
+            die("ledger %s belongs to Journal store %s, and the destination's "
+                "identity could not be read to confirm it is the same store. "
+                "Check that journal-cli can read the store (Full Disk Access), "
+                "then retry." % (path, meta["store"]))
         if store and meta.get("store") and meta["store"] != store:
             # Written against another Journal store (restored on another Mac):
             # its primary keys belong there. verify_legacy remaps them by the
